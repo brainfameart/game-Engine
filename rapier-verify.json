@@ -1,0 +1,10 @@
+{
+  "initialized": true,
+  "version": "0.20.0",
+  "bodyHandle": 0,
+  "colliderHandle": 0,
+  "translationAfterStep": {
+    "x": 0,
+    "y": 0.0017031251918524504
+  }
+}

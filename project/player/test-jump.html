@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<script src="../vendor/pixi/pixi.min.js"></script>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Dynamic Jump Reset Regression</title>
+<style>
+  html,body{margin:0;padding:0;background:#0c0f14;color:#eef2f7;font-family:system-ui,sans-serif}
+  #layout{display:grid;grid-template-columns:520px 1fr;min-height:100vh}
+  #scene{position:relative;background:#111822;border-right:1px solid #293241;overflow:hidden}
+  canvas{display:block;width:100%;height:100%}
+  #report{padding:22px;max-width:760px}
+  h1{font-size:20px;margin:0 0 6px}.sub{color:#9aa6b5;font-size:13px;line-height:1.45}
+  #summary{font-size:16px;font-weight:800;margin:16px 0}.pass{color:#66d17a}.fail{color:#ff6b6b}.pending{color:#9aa6b5}
+  .case{border:1px solid #293241;border-radius:10px;padding:12px 14px;margin:10px 0}.case.pass{border-color:#2d6b3c}.case.fail{border-color:#7a2d2d}
+  .case h2{font-size:14px;margin:0 0 4px}.case p{font-size:12px;color:#aab5c3;margin:3px 0}.badge{font-weight:800}
+  #telemetry{font:12px ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;color:#bfc8d4;margin-top:14px;padding:10px;background:#0a0d12;border-radius:8px}
+</style>
+</head>
+<body>
+<div id="layout"><div id="scene"></div><div id="report">
+<h1>Dynamic CharacterController Jump Reset</h1>
+<div class="sub">Real engine regression. Dynamic Rigidbody2D + CharacterController, <b>maxJumps = 2</b>. It checks that jumps are limited per airtime, reset on real floor contact, and cannot reset from a wall/apex.</div>
+<div id="summary" class="pending">Starting…</div>
+<div id="cases"></div>
+<div id="telemetry"></div>
+</div></div>
+<script type="module" src="./test-jump.js?t=2"></script>
+</body></html>

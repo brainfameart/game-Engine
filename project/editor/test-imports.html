@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head><title>Import Test</title>
+<style>body{background:#1a1a2e;color:#0f0;font-family:monospace;font-size:12px;padding:10px;white-space:pre-wrap;}</style>
+<script src="../vendor/pixi/pixi.min.js"></script>
+<script src="../vendor/jszip/jszip.min.js"></script>
+</head>
+<body>
+<div id="log"></div>
+<script type="module">
+const log = document.getElementById('log');
+function msg(t) { log.textContent += t + '\n'; }
+
+const modules = [
+  './panels/Toolbar.js',
+  './panels/Hierarchy.js',
+  './panels/Viewport.js',
+  './panels/Inspector.js',
+  './panels/BottomPanel.js',
+  './panels/AnimationWindow.js',
+  './panels/TilesetPanel.js',
+  './panels/StatusBar.js',
+  './viewport/SceneViewport.js',
+  './viewport/PlayWindow.js',
+  './state/EditorEvents.js',
+  './state/EditorState.js',
+  './state/ConsoleCapture.js',
+];
+
+msg('PIXI loaded: ' + (typeof PIXI !== 'undefined'));
+msg('JSZip loaded: ' + (typeof JSZip !== 'undefined'));
+msg('Testing ' + modules.length + ' modules...');
+msg('');
+
+(async () => {
+  for (const m of modules) {
+    try {
+      await import(m + '?t=' + Date.now());
+      msg('OK: ' + m);
+    } catch(e) {
+      msg('FAIL: ' + m + ' -> ' + (e.message || e.toString()));
+      if (e.stack) msg('  ' + e.stack.split('\n')[1]?.trim());
+    }
+  }
+  msg('\nDone.');
+})();
+</script>
+</body>
+</html>

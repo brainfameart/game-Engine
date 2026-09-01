@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>ZenEngine — Play</title>
+<script src="../../vendor/pixi/pixi.min.js"></script>
+<script src="../../vendor/hammer/hammer.min.js"></script>
+<style>
+  html, body { height: 100%; margin: 0; padding: 0; background: #000; overflow: hidden; }
+  /* game-canvas fills the real popup window exactly (same pattern as
+     player/play.html) — the engine's own scalingMode/letterboxing
+     settings (see CameraUtils.js's computeScreenFit) are what actually
+     fit the reference resolution inside this, not any CSS here. */
+  #game-canvas { width: 100vw; height: 100vh; }
+  #game-canvas canvas { display: block; }
+</style>
+</head>
+<body>
+  <div id="game-canvas"></div>
+  <script type="module" src="./play-popup.js"></script>
+</body>
+</html>

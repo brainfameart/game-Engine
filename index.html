@@ -1,1 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZenEngine Hub</title>
 
+    <link rel="manifest" href="manifest.webmanifest">
+    <meta name="theme-color" content="#07070b">
+    <link rel="icon" href="icons/icon-192.png" type="image/png">
+    <link rel="apple-touch-icon" href="icons/icon-512.png">
+
+    <link href="css/fonts/fonts.css" rel="stylesheet">
+    <script src="js/vendor/lucide.min.js"></script>
+
+    <link rel="stylesheet" href="css/tokens.css">
+    <link rel="stylesheet" href="css/base.css">
+    <link rel="stylesheet" href="css/layout.css">
+    <link rel="stylesheet" href="css/components.css">
+</head>
+<body class="antialiased">
+
+    <div class="film-grain"></div>
+
+    <!-- Title bar -->
+    <div class="titlebar" id="titlebar-root"></div>
+
+    <div class="app-shell">
+        <!-- Left rail -->
+        <aside class="rail" id="rail-root"></aside>
+
+        <!-- Main -->
+        <main class="main">
+            <header class="topbar" id="topbar-root"></header>
+
+            <div class="view-area" id="view-root">
+                <!-- Views are mounted here by router.js -->
+            </div>
+        </main>
+    </div>
+
+    <!-- New Project modal mount -->
+    <div id="modal-root"></div>
+
+    <!-- Module scripts, dependency order matters (no bundler) -->
+    <script src="js/data/ZenPersistence.js"></script>
+    <script src="js/data/EngineVersion.js"></script>
+    <script src="js/data/templates.js"></script>
+    <script src="js/data/projects.js"></script>
+    <script src="js/data/store.js"></script>
+    <script src="js/data/pwa.js"></script>
+
+    <script src="js/utils/dom.js"></script>
+    <script src="js/utils/format.js"></script>
+    <script src="js/utils/icons.js"></script>
+    <script src="js/utils/nav.js"></script>
+
+    <script src="js/components/Titlebar.js"></script>
+    <script src="js/components/Rail.js"></script>
+    <script src="js/components/Topbar.js"></script>
+    <script src="js/components/ProjectCard.js"></script>
+    <script src="js/components/ProjectList.js"></script>
+    <script src="js/components/TemplateGrid.js"></script>
+    <script src="js/components/NewProjectModal.js"></script>
+    <script src="js/components/EmptyState.js"></script>
+    <script src="js/components/LearnView.js"></script>
+    <script src="js/components/InstallsView.js"></script>
+
+    <script src="js/router.js"></script>
+    <script src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+<meta http-equiv="Pragma" content="no-cache" />
+<meta http-equiv="Expires" content="0" />
+<title>ZenEngine Editor</title>
+<script src="../vendor/pixi/pixi.min.js"></script>
+<script src="../vendor/jszip/jszip.min.js"></script>
+<script src="../vendor/hammer/hammer.min.js"></script>
+<link rel="stylesheet" href="../../css/fonts/fonts.css" />
+<!-- Shared tiered storage (localStorage + IndexedDB fallback) used by
+     both the launcher and this editor for per-project autosave — see
+     js/data/ZenPersistence.js and editor/state/ProjectStorage.js.
+     Loaded as a plain classic script (not an ES import) so it's
+     available as window.ZenPersistence before any editor module runs,
+     exactly like the other local engine vendor files above. -->
+<script src="../../js/data/ZenPersistence.js"></script>
+<link rel="stylesheet" href="./styles/editor.css" />
+<script>
+// Early error buffer: collect errors BEFORE main.js loads so they can
+// be flushed into the editor's ConsoleCapture once it's ready.
+window.__zengineEarlyErrors = [];
+window.__zengineEarlyLogs = function(level, msg) {
+  window.__zengineEarlyErrors.push({ level: level, msg: msg, time: Date.now() });
+};
+
+// Auto-recovery: if a JS module fails to load (e.g. "Failed to fetch
+// dynamically imported module" from a missing/stale file, or
+// "Unexpected end of input" from a truncated cached file), automatically
+// reload once with cache-busting. If the retry also fails, show a small
+// error banner — NOT a full-screen overlay — with a Reload button.
+//
+// UNSAVED-CHANGES GUARD: this reload is entirely separate from (and
+// runs BEFORE) main.js's beforeunload listener even exists — this
+// script executes immediately on page load, well before main.js has
+// been imported and had a chance to register anything. That means a
+// silent location.replace() call here bypasses the "you have unsaved
+// changes" prompt completely: no dialog ever shows, so there's nothing
+// to click Cancel on, and the reload just happens — which looks
+// exactly like "the engine restarted even though I clicked Cancel"
+// even though no such dialog was ever actually shown for this
+// particular reload. This is most likely to fire under the exact same
+// conditions that cause other performance-pressure symptoms elsewhere
+// in the editor (low memory, GC pauses, a slow/failed module fetch) —
+// i.e. precisely when the person is most likely to have unsaved work
+// sitting in the live scene. window.__zengineDirtyCheck (installed
+// below, read by main.js) lets this script check the SAME
+// dirtyState.isDirty flag main.js's own beforeunload guard uses,
+// without needing to import any editor module (this script runs too
+// early for ES imports). If it's ever unavailable (dirtyState hasn't
+// loaded yet, or this reload fires before ANY project data exists),
+// this defaults to allowing the reload — a module-load failure this
+// early in boot means there's realistically no in-memory project data
+// to lose yet.
+window.__zengineDirtyCheck = null; // set by main.js once EditorState.js has loaded — see EditorState.js's markDirty doc comment
+(function () {
+  var p = new URLSearchParams(location.search);
+  var recovered = p.get("recovered") === "1";
+  function hasUnsavedChanges() {
+    try {
+      return typeof window.__zengineDirtyCheck === "function" && window.__zengineDirtyCheck() === true;
+    } catch (_) {
+      return false;
+    }
+  }
+  function reload() {
+    if (hasUnsavedChanges()) {
+      // Don't silently discard unsaved work. Also don't fall through to
+      // showFallback() here — that function replaces #app's ENTIRE
+      // contents, which would destroy the currently-running editor
+      // (and the unsaved scene state sitting in it) just as badly as
+      // the reload this is meant to prevent. The whole reason this
+      // branch matters is that the editor IS still alive and usable in
+      // this case (a module fetch failed somewhere, but the
+      // already-running instance still has the person's work in
+      // memory) — so show a small, non-destructive toast instead and
+      // leave the running editor completely untouched.
+      showUnsavedRecoveryToast();
+      return;
+    }
+    p.set("recovered", "1");
+    p.set("t", Date.now().toString());
+    location.replace(location.pathname + "?" + p.toString());
+  }
+  function showUnsavedRecoveryToast() {
+    if (document.getElementById("zengine-recovery-toast")) return; // already showing
+    var el = document.createElement("div");
+    el.id = "zengine-recovery-toast";
+    el.style.cssText =
+      "position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:999999;" +
+      "display:flex;align-items:center;gap:12px;max-width:min(90vw,460px);padding:10px 16px;" +
+      "background:#3a2a12;border:1px solid #b8791a;color:#f0c674;font-family:system-ui;" +
+      "font-size:12px;line-height:1.4;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.5);";
+    el.innerHTML =
+      '<span>A background file failed to load, but your unsaved changes are safe \u2014 save your work, then reload when ready.</span>' +
+      '<button id="zengine-recovery-toast-save" style="flex-shrink:0;padding:6px 12px;background:#6366f1;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:12px;">Save now</button>' +
+      '<button id="zengine-recovery-toast-dismiss" style="flex-shrink:0;background:none;border:none;color:#8e8e9a;cursor:pointer;font-size:16px;line-height:1;padding:0 2px;">\u00d7</button>';
+    document.body.appendChild(el);
+    var saveBtn = document.getElementById("zengine-recovery-toast-save");
+    if (saveBtn) {
+      saveBtn.addEventListener("click", function () {
+        // window.__zengineSaveNow is wired by main.js's boot() the same
+        // way __zengineDirtyCheck is (see that comment above) — calls
+        // the exact same Toolbar.js "Save Now" path a manual click
+        // would, so the toast's button behaves identically to using
+        // the real button.
+        try {
+          if (typeof window.__zengineSaveNow === "function") window.__zengineSaveNow();
+        } catch (_) {}
+      });
+    }
+    var dismissBtn = document.getElementById("zengine-recovery-toast-dismiss");
+    if (dismissBtn) {
+      dismissBtn.addEventListener("click", function () {
+        if (el.parentNode) el.parentNode.removeChild(el);
+      });
+    }
+  }
+  function showFallback() {
+    var el = document.getElementById("app") || document.body;
+    el.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;background:#1a1a2e;color:#fff;font-family:system-ui;text-align:center;padding:20px;">' +
+      '<h2 style="margin:0 0 8px;font-size:18px;">Editor failed to load</h2>' +
+      '<p style="margin:0 0 16px;color:#999;font-size:13px;max-width:340px;">A JavaScript module failed to load — this is usually a stale cache issue. Click Reload to force-refresh all engine files.</p>' +
+      '<button onclick="location.replace(location.pathname)" style="padding:8px 24px;background:#6366f1;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;">Reload</button>' +
+      "</div>";
+  }
+  function handleError(msg) {
+    if (!msg) return;
+    // These errors mean a module file couldn't be fetched or parsed —
+    // try one cache-busting reload. On the second failure, show fallback.
+    var isModuleError =
+      msg.indexOf("Failed to fetch dynamically imported module") !== -1 ||
+      msg.indexOf("error resolving module") !== -1 ||
+      msg.indexOf("Unexpected end of input") !== -1 ||
+      msg.indexOf("SyntaxError") !== -1;
+    if (isModuleError) {
+      if (!recovered) reload();
+      else showFallback();
+    }
+  }
+  window.addEventListener("error", function (e) {
+    handleError((e.error && e.error.message) || e.message || "");
+  });
+  window.addEventListener("unhandledrejection", function (e) {
+    handleError((e.reason && (e.reason.message || e.reason.toString())) || "");
+  });
+  // Safety net: if #app is still empty after 10s, a module likely failed
+  // silently — try one cache-busting reload.
+  setTimeout(function () {
+    var app = document.getElementById("app");
+    if (app && app.children.length === 0) {
+      if (!recovered) reload();
+      else showFallback();
+    }
+  }, 10000);
+})();
+</script>
+<style>
+  /* Cinematic first-load screen. Pure inline CSS (no external
+     dependency, no wait on editor.css/main.js) so it paints
+     immediately — before PIXI/JSZip/Hammer's blocking script tags
+     in <head> have even finished downloading, which is normally
+     where most of the ~10s cold-cache delay on a project's very
+     first open comes from. Faded out (see the script at the bottom
+     of <body>) the moment main.js's first render() actually
+     populates #app — instant on every load after the first, since
+     the browser cache makes the local vendor scripts near-free the second
+     time around. */
+  #zengine-boot-screen {
+    position: fixed; inset: 0; z-index: 999999;
+    display: flex; align-items: center; justify-content: center;
+    background:
+      radial-gradient(circle at 30% 20%, rgba(212,175,106,0.07), transparent 55%),
+      radial-gradient(circle at 75% 80%, rgba(212,175,106,0.05), transparent 50%),
+      #07070b;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    transition: opacity 0.5s ease, visibility 0.5s ease;
+  }
+  #zengine-boot-screen.zbs-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
+  .zbs-inner { display: flex; flex-direction: column; align-items: center; gap: 22px; }
+  .zbs-mark {
+    width: 64px; height: 64px; position: relative;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .zbs-mark svg { width: 100%; height: 100%; }
+  .zbs-mark-ring {
+    fill: none; stroke: rgba(212,175,106,0.18); stroke-width: 2.5;
+  }
+  .zbs-mark-arc {
+    fill: none; stroke: #d4af6a; stroke-width: 2.5; stroke-linecap: round;
+    stroke-dasharray: 130; stroke-dashoffset: 100;
+    transform-origin: 50% 50%;
+    animation: zbs-spin 1.4s cubic-bezier(0.65,0,0.35,1) infinite;
+  }
+  @keyframes zbs-spin {
+    0%   { transform: rotate(0deg);   stroke-dashoffset: 100; }
+    50%  { transform: rotate(540deg); stroke-dashoffset: 25; }
+    100% { transform: rotate(1080deg); stroke-dashoffset: 100; }
+  }
+  .zbs-word {
+    font-size: 13px; letter-spacing: 0.28em; text-transform: uppercase;
+    color: #f4f4f6; font-weight: 600; text-align: center;
+  }
+  .zbs-word span { color: #d4af6a; }
+  .zbs-sub {
+    font-size: 12px; color: #8e8e9a; text-align: center;
+    min-height: 16px; letter-spacing: 0.02em;
+  }
+  .zbs-bar {
+    width: 220px; height: 2px; border-radius: 2px;
+    background: rgba(255,255,255,0.07); overflow: hidden; position: relative;
+  }
+  .zbs-bar::after {
+    content: ''; position: absolute; top: 0; bottom: 0; left: -40%;
+    width: 40%; border-radius: 2px;
+    background: linear-gradient(90deg, transparent, #d4af6a, transparent);
+    animation: zbs-sweep 1.5s ease-in-out infinite;
+  }
+  @keyframes zbs-sweep {
+    0%   { left: -40%; }
+    100% { left: 100%; }
+  }
+</style>
+</head>
+<body>
+  <div id="zengine-boot-screen">
+    <div class="zbs-inner">
+      <div class="zbs-mark">
+        <svg viewBox="0 0 64 64">
+          <circle class="zbs-mark-ring" cx="32" cy="32" r="26"></circle>
+          <circle class="zbs-mark-arc" cx="32" cy="32" r="26"></circle>
+        </svg>
+      </div>
+      <div class="zbs-word">Zen<span>Engine</span></div>
+      <div class="zbs-bar"></div>
+      <div class="zbs-sub" id="zbs-status">Loading project&hellip;</div>
+    </div>
+  </div>
+  <div id="app"></div>
+  <script>
+  // Cycles a few status lines so the first (slowest) load reads as
+  // active progress rather than a stalled screen. Purely cosmetic —
+   // doesn't reflect real load stages, since the underlying local vendor
+   // files (PIXI/JSZip/Hammer.js in <head>, Rapier's WASM initialized
+   // later on demand) don't expose granular progress events to hook
+  // into.
+  (function () {
+    var lines = ["Loading project\u2026", "Booting renderer\u2026", "Preparing scene\u2026", "Almost there\u2026"];
+    var i = 0;
+    var el = document.getElementById("zbs-status");
+    window.__zengineBootInterval = setInterval(function () {
+      i = (i + 1) % lines.length;
+      if (el) el.textContent = lines[i];
+    }, 1800);
+  })();
+  </script>
+  <script>
+  // Hide the boot screen the moment the editor's first real render()
+  // lands content in #app. A MutationObserver (rather than a fixed
+  // timeout) means this works regardless of how long that actually
+  // takes — instant on a warm cache, ~10s on a cold one, adapting
+  // either way instead of guessing a duration.
+  (function () {
+    var app = document.getElementById("app");
+    var boot = document.getElementById("zengine-boot-screen");
+    if (!app || !boot) return;
+    function reveal() {
+      clearInterval(window.__zengineBootInterval);
+      boot.classList.add("zbs-hidden");
+      setTimeout(function () {
+        if (boot && boot.parentNode) boot.parentNode.removeChild(boot);
+      }, 550);
+      observer.disconnect();
+    }
+    if (app.children.length > 0) { reveal(); return; }
+    var observer = new MutationObserver(function () {
+      if (app.children.length > 0) reveal();
+    });
+    observer.observe(app, { childList: true });
+    // Safety net: never leave the boot screen up forever even if
+    // something upstream goes wrong in a way that still (eventually)
+    // shows SOME UI without ever mutating #app's direct children —
+    // matches the existing 10s "auto-recovery" timeout above, plus a
+    // small margin, so this never fires before that has a chance to.
+    setTimeout(reveal, 16000);
+  })();
+  </script>
+  <script>
+  // Error handler: route all errors to console.error (so the editor's
+  // ConsoleCapture picks them up and shows them in the engine console
+  // panel) instead of showing a full-screen overlay. A small toast at
+  // the bottom provides a visible signal without blocking the editor.
+  window.addEventListener("error", function(e) {
+    var msg = (e.error && e.error.message) || e.message || "";
+    // Suppress the known PIXI ResizeObserver race during innerHTML
+    // rebuilds — the retry in main.js handles it.
+    if (msg.indexOf("no longer a child") !== -1 || msg.indexOf("node to be removed") !== -1) {
+      e.preventDefault();
+      return;
+    }
+    var text = "ERROR: " + ((e.error && e.error.stack) || e.message || JSON.stringify(e));
+    console.error(text);
+    window.__zengineEarlyLogs("error", text);
+    // Show a small non-blocking toast
+
+  });
+  window.addEventListener("unhandledrejection", function(e) {
+    var msg = (e.reason && (e.reason.message || e.reason.toString())) || "";
+    if (msg.indexOf("no longer a child") !== -1 || msg.indexOf("node to be removed") !== -1) {
+      e.preventDefault();
+      return;
+    }
+    var text = "REJECTION: " + ((e.reason && (e.reason.stack || e.reason.message || e.reason.toString())) || JSON.stringify(e.reason));
+    console.error(text);
+    window.__zengineEarlyLogs("error", text);
+
+  });
+  // Check if PIXI loaded — log to console, don't block the screen
+  setTimeout(function() {
+    if (typeof PIXI === "undefined") {
+       var msg = "PIXI is undefined - local vendor script failed to load";
+      console.error(msg);
+      window.__zengineEarlyLogs("error", msg);
+
+    }
+  }, 3000);
+  </script>
+  <script type="module">
+    // Cache-bust: always fetch the latest main.js (never a stale cached
+    // copy) by appending a per-load timestamp. The no-cache meta tags
+    // above force the browser to revalidate every transitive ES module
+    // import too, so published updates are always visible without a
+    // manual hard-refresh.
+    import("./main.js?t=" + Date.now()).catch(function(err) {
+      // If main.js itself fails to load, log it — the auto-recovery
+      // handler above will trigger a cache-busting reload.
+      console.error("Failed to load editor main.js:", err);
+      window.__zengineEarlyLogs("error", "Failed to load editor main.js: " + (err && err.message ? err.message : err));
+    });
+  </script>
+</body>
+</html>
