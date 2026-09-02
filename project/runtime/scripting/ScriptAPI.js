@@ -1298,9 +1298,13 @@ export class ScriptAPI {
       return { screenX: screenX, screenY: screenY, worldX: world.x, worldY: world.y };
     }
 
+    function isTouchPointer(e) {
+      return e.pointerType === "touch" || e.pointerType === "pen";
+    }
+
     // ── Mouse input (pointer events, non-touch only) ──────────────────
     canvas.addEventListener("pointermove", function (e) {
-      if (e.pointerType === "touch") return; // touch handled by Hammer below
+      if (isTouchPointer(e)) return; // touch/pen handled by the touch path below
       var c = toCoords(e.clientX, e.clientY);
       self._mouse.x = c.worldX;
       self._mouse.y = c.worldY;
@@ -1309,15 +1313,15 @@ export class ScriptAPI {
       self._mouse.over = true;
     });
     canvas.addEventListener("pointerleave", function (e) {
-      if (e.pointerType !== "touch") self._mouse.over = false;
+      if (!isTouchPointer(e)) self._mouse.over = false;
     });
     canvas.addEventListener("pointerdown", function (e) {
-      if (e.pointerType === "touch") return;
+      if (isTouchPointer(e)) return;
       self._mouse.buttonsDown.add(e.button);
       self._mouse.buttonsPressed.add(e.button);
     });
     canvas.addEventListener("pointerup", function (e) {
-      if (e.pointerType === "touch") return;
+      if (isTouchPointer(e)) return;
       self._mouse.buttonsDown.delete(e.button);
       self._mouse.buttonsReleased.add(e.button);
     });
@@ -1332,128 +1336,89 @@ export class ScriptAPI {
       if (e.ctrlKey) e.preventDefault();
     }, { passive: false });
 
-    // ── Hammer.js — all touch/gesture input ──────────────────────────
-    // Hammer automatically sets touch-action:none on the canvas (the
-    // missing piece that prevented pointer events from ever firing on
-    // mobile — the browser was swallowing them for scroll/zoom).
-    if (typeof Hammer === "undefined") {
-      // Fallback: Hammer local vendor not loaded yet. Warn once and wire raw
-      // touch events so at least basic finger positions still work.
-      console.warn("[ZenEngine] Hammer.js not loaded — touch gestures unavailable. Add hammer.min.js before the game script.");
-      canvas.style.touchAction = "none";
+    // ── Native touch/pointer input ────────────────────────────────────
+    // Do not make mobile input depend on Hammer's backend choice. Older
+    // Android WebViews expose Touch Events, newer ones expose Pointer Events,
+    // and some hybrid devices expose both. Native input is the source of
+    // truth here; swipe and pinch are derived from the live touch map below.
+    canvas.style.touchAction = "none";
+    canvas.style.userSelect = "none";
+    canvas.style.webkitUserSelect = "none";
+
+    function touchStart(id, clientX, clientY) {
+      var c = toCoords(clientX, clientY);
+      self._touches.set(id, {
+        id: id,
+        x: c.worldX, y: c.worldY,
+        screenX: c.screenX, screenY: c.screenY,
+        startX: c.worldX, startY: c.worldY,
+      });
+      self._touchesStarted.add(id);
+    }
+
+    function touchMove(id, clientX, clientY) {
+      if (!self._touches.has(id)) return;
+      var c = toCoords(clientX, clientY);
+      var entry = self._touches.get(id);
+      entry.x = c.worldX; entry.y = c.worldY;
+      entry.screenX = c.screenX; entry.screenY = c.screenY;
+    }
+
+    function touchEnd(id) {
+      if (!self._touches.has(id)) return;
+      self._touchesEndedData.set(id, Object.assign({}, self._touches.get(id)));
+      self._touches.delete(id);
+      self._touchesEnded.add(id);
+    }
+
+    if (typeof window.PointerEvent === "function") {
+      canvas.addEventListener("pointerdown", function (e) {
+        if (!isTouchPointer(e)) return;
+        e.preventDefault();
+        if (canvas.setPointerCapture) {
+          try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+        }
+        touchStart(e.pointerId, e.clientX, e.clientY);
+      }, { passive: false });
+      canvas.addEventListener("pointermove", function (e) {
+        if (!isTouchPointer(e)) return;
+        e.preventDefault();
+        touchMove(e.pointerId, e.clientX, e.clientY);
+      }, { passive: false });
+      function pointerTouchEnd(e) {
+        if (!isTouchPointer(e)) return;
+        e.preventDefault();
+        touchEnd(e.pointerId);
+        if (canvas.releasePointerCapture) {
+          try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+        }
+      }
+      canvas.addEventListener("pointerup", pointerTouchEnd, { passive: false });
+      canvas.addEventListener("pointercancel", pointerTouchEnd, { passive: false });
+    } else {
       canvas.addEventListener("touchstart", function (e) {
         e.preventDefault();
         for (var i = 0; i < e.changedTouches.length; i++) {
           var t = e.changedTouches[i];
-          var c = toCoords(t.clientX, t.clientY);
-          self._touches.set(t.identifier, { id: t.identifier, x: c.worldX, y: c.worldY, screenX: c.screenX, screenY: c.screenY, startX: c.worldX, startY: c.worldY });
-          self._touchesStarted.add(t.identifier);
+          touchStart(t.identifier, t.clientX, t.clientY);
         }
       }, { passive: false });
       canvas.addEventListener("touchmove", function (e) {
         e.preventDefault();
         for (var i = 0; i < e.changedTouches.length; i++) {
           var t = e.changedTouches[i];
-          if (!self._touches.has(t.identifier)) continue;
-          var c = toCoords(t.clientX, t.clientY);
-          var entry = self._touches.get(t.identifier);
-          entry.x = c.worldX; entry.y = c.worldY;
-          entry.screenX = c.screenX; entry.screenY = c.screenY;
+          touchMove(t.identifier, t.clientX, t.clientY);
         }
       }, { passive: false });
       function rawTouchEnd(e) {
         e.preventDefault();
         for (var i = 0; i < e.changedTouches.length; i++) {
-          var t = e.changedTouches[i];
-          if (self._touches.has(t.identifier)) {
-            self._touchesEndedData.set(t.identifier, Object.assign({}, self._touches.get(t.identifier)));
-            self._touches.delete(t.identifier);
-            self._touchesEnded.add(t.identifier);
-          }
+          touchEnd(e.changedTouches[i].identifier);
         }
       }
       canvas.addEventListener("touchend", rawTouchEnd, { passive: false });
       canvas.addEventListener("touchcancel", rawTouchEnd, { passive: false });
-      return;
     }
-
-    // Hammer Manager — enables Pan (all directions, no threshold so
-    // every move fires), Swipe, and Pinch simultaneously.
-    var hammer = new Hammer.Manager(canvas, {
-      touchAction: "none",
-      recognizers: [
-        [Hammer.Pan,   { direction: Hammer.DIRECTION_ALL, threshold: 0, pointers: 0 }],
-        [Hammer.Swipe, { direction: Hammer.DIRECTION_ALL, threshold: 10, velocity: 0.3, pointers: 1 }],
-        [Hammer.Pinch, { enable: true }],
-      ],
-    });
-    self._hammerInstance = hammer;
-
-    // hammer.input fires on EVERY raw pointer/touch event (start, move,
-    // end, cancel). Use it to keep self._touches in sync — same Maps
-    // the `touch` getter already reads, so the getter is unchanged.
-    hammer.on("hammer.input", function (ev) {
-      // BUG FIX: only Hammer's TouchInput backend gives pointer objects
-      // a `.identifier` (that's the native Touch interface's field).
-      // On Chrome/ChromeOS/Android — anywhere window.PointerEvent is
-      // supported — Hammer instead uses PointerEventInput, whose
-      // pointer objects are raw PointerEvents: those have `.pointerId`,
-      // and `.identifier` on them is simply undefined. Every finger was
-      // therefore being written into self._touches under the SAME key
-      // (undefined), each new touch silently overwriting the last —
-      // which is why touch.count was stuck at 1 and pinch (which needs
-      // two simultaneous entries) could never see more than one finger.
-      // getId() picks whichever field this backend actually provides.
-      function getId(p) { return p.identifier !== undefined ? p.identifier : p.pointerId; }
-
-      // Also guard against Hammer's unified Pointer Events backend
-      // feeding MOUSE-originated pointer activity into this handler —
-      // PointerEventInput doesn't only report touches, and mouse is
-      // already fully handled by the separate pointerdown/move/up
-      // listeners above. Without this, moving/clicking the mouse could
-      // start leaking a phantom entry into self._touches too.
-      if (ev.pointerType !== "touch") return;
-
-      var INPUT_START  = 1; // Hammer.INPUT_START
-      var INPUT_MOVE   = 2; // Hammer.INPUT_MOVE
-      var INPUT_END    = 4; // Hammer.INPUT_END
-      var INPUT_CANCEL = 8; // Hammer.INPUT_CANCEL
-
-      if (ev.eventType === INPUT_START) {
-        for (var i = 0; i < ev.changedPointers.length; i++) {
-          var p = ev.changedPointers[i];
-          var id = getId(p);
-          var c = toCoords(p.clientX, p.clientY);
-          self._touches.set(id, {
-            id: id,
-            x: c.worldX, y: c.worldY,
-            screenX: c.screenX, screenY: c.screenY,
-            startX: c.worldX, startY: c.worldY,
-          });
-          self._touchesStarted.add(id);
-        }
-      } else if (ev.eventType === INPUT_MOVE) {
-        for (var i = 0; i < ev.pointers.length; i++) {
-          var p = ev.pointers[i];
-          var id = getId(p);
-          if (!self._touches.has(id)) continue;
-          var c = toCoords(p.clientX, p.clientY);
-          var entry = self._touches.get(id);
-          entry.x = c.worldX; entry.y = c.worldY;
-          entry.screenX = c.screenX; entry.screenY = c.screenY;
-        }
-      } else if (ev.eventType === INPUT_END || ev.eventType === INPUT_CANCEL) {
-        for (var i = 0; i < ev.changedPointers.length; i++) {
-          var p = ev.changedPointers[i];
-          var id = getId(p);
-          if (self._touches.has(id)) {
-            self._touchesEndedData.set(id, Object.assign({}, self._touches.get(id)));
-            self._touches.delete(id);
-            self._touchesEnded.add(id);
-          }
-        }
-      }
-    });
   }
 
   /**

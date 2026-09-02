@@ -1462,6 +1462,63 @@ let _lastSceneClick = { id: null, time: 0 };
         const gameTitle = (editorState.exportGameTitle || editorState.projectName || "Untitled Project").trim() || "Untitled Project";
         editorState.exportStatus = { phase: "running", message: "Starting\u2026" };
         render();
+        if (format === "android") {
+          buildExport(editorState.game, {
+            projectName: gameTitle,
+            faviconDataUrl: editorState.exportFavicon ? editorState.exportFavicon.dataUrl : null,
+            format: "html",
+            onProgress: (message) => {
+              editorState.exportStatus = { phase: "running", message };
+              render();
+            },
+          })
+            .then(({ zip, stats }) => {
+              editorState.exportStatus = { phase: "running", message: "Preparing Android build\u2026" };
+              render();
+              return zip
+                .generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 9 } })
+                .then((blob) => {
+                  editorState.exportStatus = { phase: "running", message: "Building APK on the server\u2026" };
+                  render();
+                  return fetch("/api/android/export?name=" + encodeURIComponent(gameTitle), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/zip" },
+                    body: blob,
+                  }).then(async (response) => {
+                    if (!response.ok) {
+                        let message = "Android export failed (" + response.status + ").";
+                        if (response.status === 405) {
+                          message =
+                            "This editor is being served by a static server that does not allow APK builds. " +
+                            "Run the included server.js, or export an HTML5 ZIP and run export-apk.js.";
+                        }
+                      try {
+                        const data = await response.json();
+                        if (data && data.error) message = data.error;
+                      } catch (_) {}
+                      throw new Error(message);
+                    }
+                    return { apk: await response.blob(), stats };
+                  });
+                });
+            })
+            .then(({ apk, stats }) => {
+              const base = slugifyForFilename(gameTitle);
+              downloadBlob(apk, base + "-android.apk");
+              editorState.exportStatus = {
+                phase: "done",
+                stats: { ...stats, format: "android", apkBytes: apk.size },
+              };
+              pushLog("log", "Exported Android APK.");
+              render();
+            })
+            .catch((err) => {
+              editorState.exportStatus = { phase: "error", error: err && err.message ? err.message : String(err) };
+              pushLog("error", "Android export failed: " + (err && err.message ? err.message : String(err)));
+              render();
+            });
+          break;
+        }
         buildExport(editorState.game, {
           projectName: gameTitle,
           faviconDataUrl: editorState.exportFavicon ? editorState.exportFavicon.dataUrl : null,

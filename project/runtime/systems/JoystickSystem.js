@@ -26,11 +26,10 @@
  *      this.joystick that frame — same "system does the real work,
  *      scripts just read the result" split TextInput/ChatLog use.
  *
- * Both real mouse (pointerdown/move/up) and real touch (Hammer.js when
- * available, raw touchstart/move/end otherwise) are handled, matching
- * ScriptAPI.attachPointerInput's own dual-path approach — mouse lets a
- * desktop tester drag a joystick with the cursor same as touch does on
- * a phone.
+ * Both real mouse (pointerdown/move/up) and real touch (native Pointer
+ * Events with a raw Touch Events fallback) are handled, matching
+ * ScriptAPI.attachPointerInput's input path — mouse lets a desktop tester
+ * drag a joystick with the cursor exactly as touch does on a phone.
  *
  * Registered in runtime/index.js; needs the canvas to convert
  * clientX/clientY into canvas-pixel coordinates, so it's constructed as
@@ -75,72 +74,84 @@ export class JoystickSystem extends System {
       return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
     }
 
+    function isTouchPointer(e) {
+      return e.pointerType === "touch" || e.pointerType === "pen";
+    }
+
     canvas.addEventListener("pointerdown", function (e) {
-      if (e.pointerType === "touch") return; // touch handled below (Hammer/raw touch)
+      if (isTouchPointer(e)) return; // touch/pen handled below
       const p = toCanvasXY(e.clientX, e.clientY);
       self._tryClaim("mouse", p.x, p.y);
     });
     canvas.addEventListener("pointermove", function (e) {
-      if (e.pointerType === "touch") return;
+      if (isTouchPointer(e)) return;
       const p = toCanvasXY(e.clientX, e.clientY);
       self._updateDrag("mouse", p.x, p.y);
     });
     canvas.addEventListener("pointerup", function (e) {
-      if (e.pointerType === "touch") return;
+      if (isTouchPointer(e)) return;
       self._release("mouse");
     });
     canvas.addEventListener("pointercancel", function (e) {
-      if (e.pointerType === "touch") return;
+      if (isTouchPointer(e)) return;
       self._release("mouse");
     });
 
-    if (typeof Hammer !== "undefined") {
-      const hammer = new Hammer.Manager(canvas, {
-        touchAction: "none",
-        recognizers: [[Hammer.Pan, { direction: Hammer.DIRECTION_ALL, threshold: 0, pointers: 0 }]],
-      });
-      this._hammerInstance = hammer;
-      hammer.on("hammer.input", function (ev) {
-        if (ev.pointerType !== "touch") return;
-        function getId(p) { return p.identifier !== undefined ? p.identifier : p.pointerId; }
-        const INPUT_START = 1, INPUT_MOVE = 2, INPUT_END = 4, INPUT_CANCEL = 8;
-        if (ev.eventType === INPUT_START) {
-          for (let i = 0; i < ev.changedPointers.length; i++) {
-            const p = ev.changedPointers[i];
-            const id = getId(p);
-            const c = toCanvasXY(p.clientX, p.clientY);
-            self._tryClaim(id, c.x, c.y);
-          }
-        } else if (ev.eventType === INPUT_MOVE) {
-          for (let i = 0; i < ev.changedPointers.length; i++) {
-            const p = ev.changedPointers[i];
-            const id = getId(p);
-            const c = toCanvasXY(p.clientX, p.clientY);
-            self._updateDrag(id, c.x, c.y);
-          }
-        } else if (ev.eventType === (INPUT_END | INPUT_CANCEL) || ev.eventType === INPUT_END || ev.eventType === INPUT_CANCEL) {
-          for (let i = 0; i < ev.changedPointers.length; i++) {
-            const p = ev.changedPointers[i];
-            self._release(getId(p));
-          }
+    canvas.style.touchAction = "none";
+    canvas.style.userSelect = "none";
+    canvas.style.webkitUserSelect = "none";
+
+    function handleTouchStart(id, clientX, clientY) {
+      const p = toCanvasXY(clientX, clientY);
+      self._tryClaim(id, p.x, p.y);
+    }
+
+    function handleTouchMove(id, clientX, clientY) {
+      const p = toCanvasXY(clientX, clientY);
+      self._updateDrag(id, p.x, p.y);
+    }
+
+    if (typeof window.PointerEvent === "function") {
+      canvas.addEventListener("pointerdown", function (e) {
+        if (!isTouchPointer(e)) return;
+        e.preventDefault();
+        if (canvas.setPointerCapture) {
+          try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
         }
-      });
+        handleTouchStart(e.pointerId, e.clientX, e.clientY);
+      }, { passive: false });
+      canvas.addEventListener("pointermove", function (e) {
+        if (!isTouchPointer(e)) return;
+        e.preventDefault();
+        handleTouchMove(e.pointerId, e.clientX, e.clientY);
+      }, { passive: false });
+      function pointerTouchEnd(e) {
+        if (!isTouchPointer(e)) return;
+        e.preventDefault();
+        self._release(e.pointerId);
+        if (canvas.releasePointerCapture) {
+          try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+        }
+      }
+      canvas.addEventListener("pointerup", pointerTouchEnd, { passive: false });
+      canvas.addEventListener("pointercancel", pointerTouchEnd, { passive: false });
     } else {
       canvas.addEventListener("touchstart", function (e) {
+        e.preventDefault();
         for (let i = 0; i < e.changedTouches.length; i++) {
           const t = e.changedTouches[i];
-          const c = toCanvasXY(t.clientX, t.clientY);
-          self._tryClaim(t.identifier, c.x, c.y);
+          handleTouchStart(t.identifier, t.clientX, t.clientY);
         }
       }, { passive: false });
       canvas.addEventListener("touchmove", function (e) {
+        e.preventDefault();
         for (let i = 0; i < e.changedTouches.length; i++) {
           const t = e.changedTouches[i];
-          const c = toCanvasXY(t.clientX, t.clientY);
-          self._updateDrag(t.identifier, c.x, c.y);
+          handleTouchMove(t.identifier, t.clientX, t.clientY);
         }
       }, { passive: false });
       function touchEnd(e) {
+        e.preventDefault();
         for (let i = 0; i < e.changedTouches.length; i++) {
           self._release(e.changedTouches[i].identifier);
         }
@@ -150,10 +161,6 @@ export class JoystickSystem extends System {
     }
 
     window.addEventListener("blur", function () {
-      // Same "a lost window focus mid-drag never sends a matching up/end
-      // event" guard ScriptAPI._setupInput uses for _mouse.buttonsDown/
-      // _touches — without this a joystick could get stuck "active"
-      // forever after an alt-tab mid-drag.
       self._claimedBy.clear();
       self._drags.clear();
     });
@@ -276,9 +283,5 @@ export class JoystickSystem extends System {
   destroy() {
     this._claimedBy.clear();
     this._drags.clear();
-    if (this._hammerInstance) {
-      try { this._hammerInstance.destroy(); } catch (e) {}
-      this._hammerInstance = null;
-    }
   }
 }

@@ -10,6 +10,7 @@
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
+const { handleAndroidExport, handleAndroidStatus } = require("./android-export.js");
 
 const ROOT = __dirname;
 const PORT = process.env.PORT || 5000;
@@ -53,6 +54,16 @@ function collectFiles(directory, relativeDirectory = "") {
 
 const server = http.createServer((req, res) => {
   let urlPath = decodeURIComponent(req.url.split("?")[0]);
+  const query = new URL(req.url, "http://127.0.0.1").searchParams;
+
+  if (req.method === "GET" && urlPath === "/api/android/status") {
+    handleAndroidStatus(res);
+    return;
+  }
+  if (req.method === "POST" && urlPath === "/api/android/export") {
+    handleAndroidExport(req, res, query);
+    return;
+  }
 
   // The service worker uses this generated list to precache every file in
   // the archive. Keeping it server-generated means new local engine files

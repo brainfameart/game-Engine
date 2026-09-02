@@ -50,10 +50,10 @@ export const FORMATS = [
   },
   {
     id: "android",
-    label: "Android",
-    iconName: "box",
-    description: "Installable Android package.",
-    comingSoon: true,
+    label: "Android APK",
+    iconName: "download",
+    description: "One debug-signed APK built on the server — no Android Studio or local build required.",
+    comingSoon: false,
   },
 ];
 
@@ -213,6 +213,7 @@ function renderProgress(status) {
 
 function renderResult(status) {
   const stats = status.stats || {};
+  const isAndroid = stats.format === "android";
   const savedPct =
     stats.bytesBefore > 0 ? Math.round((1 - stats.bytesAfter / stats.bytesBefore) * 100) : 0;
   const skippedNote =
@@ -225,10 +226,12 @@ function renderResult(status) {
     '<div style="padding:8px 4px;">' +
     '<div style="display:flex;align-items:center;gap:8px;color:#4ade80;margin-bottom:10px;">' +
     icon("info", 16) +
-    '<span style="font-size:12px;font-weight:600;">Export ready \u2014 download started</span>' +
+    '<span style="font-size:12px;font-weight:600;">' + (isAndroid ? "APK ready \u2014 download started" : "Export ready \u2014 download started") + "</span>" +
     "</div>" +
     '<div style="font-size:11px;color:#c8d0de;line-height:1.7;">' +
-    stats.spriteCount + " image(s), " + stats.audioCount + " audio clip(s) bundled." +
+    (isAndroid
+      ? "A debug-signed Android APK was built. Install it directly on an Android device."
+      : stats.spriteCount + " image(s), " + stats.audioCount + " audio clip(s) bundled.") +
     (stats.bytesBefore ? "<br/>Assets shrunk by ~" + savedPct + "% (" + formatBytes(stats.bytesBefore) + " \u2192 " + formatBytes(stats.bytesAfter) + ")." : "") +
     "</div>" +
     skippedNote +

@@ -182,10 +182,24 @@ const VENDOR_FILES = [
  * @returns {Promise<Uint8Array>}
  */
 async function fetchLocalFile(relativePath) {
-  const url = new URL(relativePath, import.meta.url);
-  const res = await fetch(url.href);
-  if (!res.ok) throw new Error("Failed to read " + relativePath + " (" + res.status + ")");
-  return new Uint8Array(await res.arrayBuffer());
+  // The normal module-relative URL is the right source of truth, but some
+  // preview/proxy layers can serve an editor module from a rewritten nested
+  // URL while static files still live at the project's canonical paths. Try
+  // that canonical path as a second, same-origin candidate so one stale
+  // module URL cannot make a valid runtime file look missing.
+  const candidates = [new URL(relativePath, import.meta.url)];
+  const normalized = relativePath.replace(/^(\.\.\/)+/, "");
+  const rootPrefix = relativePath.startsWith("../../../") ? "/" : "/project/";
+  const canonical = new URL(rootPrefix + normalized, window.location.origin);
+  if (canonical.href !== candidates[0].href) candidates.push(canonical);
+
+  let lastStatus = 0;
+  for (const url of candidates) {
+    const res = await fetch(url.href);
+    if (res.ok) return new Uint8Array(await res.arrayBuffer());
+    lastStatus = res.status;
+  }
+  throw new Error("Failed to read " + relativePath + " (" + lastStatus + ")");
 }
 
 /**

@@ -1,0 +1,13 @@
+{
+  "name": "zenengine-portable",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Portable ZenEngine editor, runtime, player, and Android APK exporter",
+  "scripts": {
+    "start": "node server.js",
+    "export-apk": "node export-apk.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
