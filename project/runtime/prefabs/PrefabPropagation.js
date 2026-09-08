@@ -40,7 +40,7 @@
  * RUNTIME-ONLY FILE.
  */
 
-import { getPrefab } from "./PrefabRegistry.js";
+import { getPrefab, resolveThumbnail } from "./PrefabRegistry.js";
 import { serializeEntity, instantiateEntity } from "../scene/SceneSerializer.js";
 import { getInactiveScenesEntities } from "../scene/SceneManager.js";
 import { World } from "../core/World.js";
@@ -284,6 +284,12 @@ export function updatePrefabFromEntity(world, sourceEntity, options = {}) {
   newTemplateData.prefabId = null;
   newTemplateData.prefabOverrides = {};
   prefab.sceneData = newTemplateData;
+  // Thumbnail is derived FROM sceneData (see PrefabRegistry.js's
+  // resolveThumbnail), so re-templating must re-resolve it too — 
+  // otherwise "Update Prefab" after swapping the source entity's
+  // sprite would silently leave the OLD image showing in the Prefabs
+  // folder even though the template itself updated correctly.
+  prefab.thumbnail = resolveThumbnail(newTemplateData);
 
   sourceEntity.prefabOverrides = {};
 

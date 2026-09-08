@@ -119,6 +119,19 @@ export class NavAgent2D {
                              // near-exact same-target convergence groups
                              // (good for tightly packed scenes).
 
+    // Car + NavAgent2D local vehicle planner. These affect navDriveToward()
+    // only; normal walking NavAgent2D behavior remains unchanged.
+    vehicleLookahead = 72,
+    vehicleCornerLookahead = 110,
+    vehicleObstacleLookahead = 120,
+    vehicleObstacleWidth = 28,
+    vehicleSteerSmoothing = 7,
+    vehicleSpeedSmoothing = 5,
+    vehicleCornerSlowdown = 0.72,
+    vehicleObstacleBrake = 0.9,
+    vehicleRecoveryTime = 1.35,
+    vehicleRecoveryReverseTime = 0.9,
+
     // Navigation — same model as Unity's NavMeshAgent.areaMask: a
     // bitmask of which NavWorld2D cell areas (Ground, Water, Mud, ...)
     // this agent is ALLOWED to path through at all — a route can never
@@ -133,6 +146,27 @@ export class NavAgent2D {
     // areas are two unrelated systems, and folding one into the other
     // was the source of an earlier confusing design.
     area = 0xffff, // default: every area allowed
+
+    // Per-agent override of NavWorld2D.areaCosts, index-aligned with the
+    // same 16 area slots (see editor/state/NavAreas.js for the name
+    // registry both arrays share). null (the default) means "use the
+    // NavWorld2D's cost for every area" — existing scenes/agents are
+    // completely unaffected until a value is set here. When non-null,
+    // this array is checked FIRST per area slot: a finite entry > 0
+    // overrides the world's cost for that slot for THIS agent only;
+    // any slot left null/undefined/non-numeric on this agent falls
+    // through to the world's cost for that slot, so an agent can
+    // override just one or two areas without having to restate every
+    // slot. Two agents can therefore treat the exact same "Mud" cell as
+    // different costs — e.g. a heavy truck agent makes Mud very
+    // expensive while a light scout agent leaves it at the world
+    // default — without either of them touching the shared NavWorld2D.
+    // See NavWorld2D.getAgentNavLayer()'s header for how this and the
+    // world cost are combined into one per-cell cost array, and
+    // NavWorld2D.areaCosts's header for the mask-vs-cost distinction
+    // (this is still a SOFT preference; area still comes from `area`
+    // above).
+    areaCosts = null,
 
     // Set (transiently, for one movement step) by NavWorldSystem/ScriptAPI
     // path-following helpers to hand a fresh path to this agent without
@@ -158,9 +192,67 @@ export class NavAgent2D {
     this.collabEnabled = !!collabEnabled;
     this.collabGroupRadius = Math.max(0, collabGroupRadius);
 
+    this.vehicleLookahead = Math.max(16, Number(vehicleLookahead) || 72);
+    this.vehicleCornerLookahead = Math.max(this.vehicleLookahead, Number(vehicleCornerLookahead) || 110);
+    this.vehicleObstacleLookahead = Math.max(24, Number(vehicleObstacleLookahead) || 120);
+    this.vehicleObstacleWidth = Math.max(4, Number(vehicleObstacleWidth) || 28);
+    this.vehicleSteerSmoothing = Math.max(1, Number(vehicleSteerSmoothing) || 7);
+    this.vehicleSpeedSmoothing = Math.max(1, Number(vehicleSpeedSmoothing) || 5);
+    this.vehicleCornerSlowdown = Math.max(0.2, Math.min(1, Number(vehicleCornerSlowdown) || 0.72));
+    this.vehicleObstacleBrake = Math.max(0.2, Math.min(1.5, Number(vehicleObstacleBrake) || 0.9));
+    this.vehicleRecoveryTime = Math.max(0.5, Number(vehicleRecoveryTime) || 1.35);
+    this.vehicleRecoveryReverseTime = Math.max(0.35, Number(vehicleRecoveryReverseTime) || 0.9);
+
     this.area = area & 0xffff;
+
+    // Normalize to either null (no override at all — the common case)
+    // or a full NAV_AREA_COUNT-length array with non-overriding slots
+    // left as null, never undefined/NaN, so getAgentNavLayer's signature
+    // + fallback logic never has to special-case a ragged input array.
+    if (Array.isArray(areaCosts)) {
+      this.areaCosts = new Array(16).fill(null);
+      for (let i = 0; i < 16; i++) {
+        const v = Number(areaCosts[i]);
+        this.areaCosts[i] = Number.isFinite(v) && v > 0 ? v : null;
+      }
+    } else {
+      this.areaCosts = null;
+    }
 
     this.currentPath = currentPath;
     this.currentPathIndex = currentPathIndex;
   }
+}
+
+/**
+ * Sets (or clears) this agent's cost OVERRIDE for one area slot —
+ * the per-agent counterpart to NavWorld2D's setNavAreaCost(). Lazily
+ * allocates the 16-slot override array the first time any slot is
+ * overridden, same "null until touched" convention the constructor
+ * uses, so an agent that never overrides anything keeps areaCosts
+ * exactly null (cheapest possible cache-key case — see
+ * NavWorld2D.getAgentNavLayer's radiusCacheKey).
+ * @param {NavAgent2D} navAgent
+ * @param {number} areaIndex 0-15
+ * @param {number|null} cost a finite cost > 0 to override with, or
+ *   null/NaN/<=0 to clear the override for this slot (falls back to
+ *   the NavWorld2D's own cost for that slot again).
+ * @returns {boolean} true if anything actually changed.
+ */
+export function setNavAgentAreaCost(navAgent, areaIndex, cost) {
+  if (!navAgent || areaIndex < 0 || areaIndex >= 16) return false;
+  const numericCost = Number(cost);
+  const clamped = Number.isFinite(numericCost) && numericCost > 0 ? Math.max(0.01, numericCost) : null;
+  const current = Array.isArray(navAgent.areaCosts) ? navAgent.areaCosts[areaIndex] : null;
+  if (current === clamped) return false;
+  if (!Array.isArray(navAgent.areaCosts)) {
+    if (clamped === null) return false; // clearing an already-unset slot: no-op
+    navAgent.areaCosts = new Array(16).fill(null);
+  }
+  navAgent.areaCosts[areaIndex] = clamped;
+  // Collapse back to null once every slot is cleared, so a fully
+  // reverted agent goes back to sharing the plain radius+mask cached
+  // layer instead of permanently paying for its own (all-null) one.
+  if (navAgent.areaCosts.every((v) => v === null)) navAgent.areaCosts = null;
+  return true;
 }

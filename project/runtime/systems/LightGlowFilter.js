@@ -89,7 +89,7 @@ export function buildLightGlowFilter() {
     uGlowStrength: 1.0,
   };
   const filter = new PIXI.Filter(VERTEX_SRC, FRAGMENT_SRC, uniforms);
-  filter.resolution = window.devicePixelRatio || 1;
+  filter.resolution = (window.__zenginePixiApp && window.__zenginePixiApp.renderer && window.__zenginePixiApp.renderer.resolution) || Math.min(2, window.devicePixelRatio || 1);
   filter.autoFit = false;
   return filter;
 }

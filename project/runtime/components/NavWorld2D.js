@@ -157,9 +157,20 @@ export function clearNavCellArea(navWorld, col, row) {
 
 /** Traversal cost multiplier for one area SLOT (not a cell) — see
  *  NavWorld2D's areaCosts field header for the mask-vs-cost distinction.
- *  Defaults to 1.0 (no preference) for any slot never explicitly set. */
-export function getNavAreaCost(navWorld, areaIndex) {
-  if (!navWorld || areaIndex < 0 || areaIndex >= NAV_AREA_COUNT) return 1;
+ *  Defaults to 1.0 (no preference) for any slot never explicitly set.
+ *  @param {number[]|null} [agentAreaCosts] optional per-agent override
+ *    array (NavAgent2D.areaCosts) — index-aligned with the same 16
+ *    slots. A finite entry > 0 at this slot wins over the world's cost
+ *    for THIS lookup only; a null/missing entry falls through to the
+ *    world's cost — same "override just what you need" behavior
+ *    NavAgent2D.areaCosts's own header describes. */
+export function getNavAreaCost(navWorld, areaIndex, agentAreaCosts = null) {
+  if (areaIndex < 0 || areaIndex >= NAV_AREA_COUNT) return 1;
+  if (Array.isArray(agentAreaCosts)) {
+    const av = agentAreaCosts[areaIndex];
+    if (typeof av === "number" && av > 0) return av;
+  }
+  if (!navWorld) return 1;
   const v = navWorld.areaCosts[areaIndex];
   return typeof v === "number" && v > 0 ? v : 1;
 }
@@ -247,18 +258,27 @@ export function getNavWorldRuntime(navWorld) {
 }
 
 /**
- * Quantizes an agent radius + area mask to a single cache key. Radii
- * within 1/16 cell-unit of each other collapse onto the same derived
- * layer — real-world agent tuning uses a handful of discrete sizes
- * (Small/Medium/Large), not a continuum — and the area mask is folded
- * in directly (it's already a 16-bit integer, so no quantization is
- * needed) so two agents sharing BOTH a radius AND an area mask share
- * one derived layer, while two agents with the same radius but
+ * Quantizes an agent radius + area mask + per-agent cost override to a
+ * single cache key. Radii within 1/16 cell-unit of each other collapse
+ * onto the same derived layer — real-world agent tuning uses a handful
+ * of discrete sizes (Small/Medium/Large), not a continuum — and the
+ * area mask is folded in directly (it's already a 16-bit integer, so no
+ * quantization is needed) so two agents sharing a radius AND a mask
+ * share one derived layer, while two agents with the same radius but
  * DIFFERENT masks correctly get their own — since the mask changes
  * which cells even count as walkable, one radius can't serve both.
+ * A per-agent areaCosts override (see NavAgent2D.areaCosts) is folded
+ * in the same way as the mask: two agents with the same radius+mask but
+ * DIFFERENT cost overrides must NOT share a layer, since layer.cost is
+ * baked per-layer (see below) — an agent with no override (the common
+ * case) uses the plain radius+mask key so it still shares layers with
+ * every other override-free agent of that radius+mask, unaffected by
+ * this feature.
  */
-function radiusCacheKey(radius, areaMask) {
-  return Math.round(Math.max(0, radius) * 16) + ":" + (areaMask & 0xffff);
+function radiusCacheKey(radius, areaMask, agentAreaCosts = null) {
+  const base = Math.round(Math.max(0, radius) * 16) + ":" + (areaMask & 0xffff);
+  if (!Array.isArray(agentAreaCosts)) return base;
+  return base + ":ac" + agentAreaCosts.map((v) => (typeof v === "number" && v > 0 ? v : "")).join(",");
 }
 
 // Area costs are editable scene data. Keep a tiny value signature beside
@@ -266,10 +286,13 @@ function radiusCacheKey(radius, areaMask) {
 // layer whose cost array was changed in-place (for example by an editor
 // migration or an older saved scene). The normal setter still invalidates
 // the whole runtime immediately; this is the defensive check for direct
-// data restoration/mutation paths.
-function areaCostsSignature(navWorld) {
+// data restoration/mutation paths. Includes the per-agent override array
+// (if any) so an in-place mutation of NavAgent2D.areaCosts is caught the
+// same way an in-place mutation of NavWorld2D.areaCosts already is.
+function areaCostsSignature(navWorld, agentAreaCosts = null) {
   const costs = navWorld && Array.isArray(navWorld.areaCosts) ? navWorld.areaCosts : [];
-  return costs.join(",");
+  const agentPart = Array.isArray(agentAreaCosts) ? "|" + agentAreaCosts.join(",") : "";
+  return costs.join(",") + agentPart;
 }
 
 /**
@@ -283,10 +306,14 @@ function areaCostsSignature(navWorld) {
  * areaCosts field) that A* reads to prefer cheaper areas without
  * treating them as impassable.
  *
- * This is computed ONCE per unique (radius, areaMask) PAIR and shared
- * by every NavAgent2D using that exact combination — never once per
- * agent instance, and never by re-baking the whole NavWorld2D. See
- * NavWorldSystem.js's pipeline diagram: "Navigation Area/Layer" and
+ * This is computed ONCE per unique (radius, areaMask, agentAreaCosts)
+ * COMBINATION and shared by every NavAgent2D using that exact
+ * combination — never once per agent instance, and never by re-baking
+ * the whole NavWorld2D. Agents with no per-agent cost override (the
+ * common case, and the only case before this parameter existed) keep
+ * sharing one layer per (radius, areaMask) exactly as before; only
+ * agents that actually set NavAgent2D.areaCosts get their own layer.
+ * See NavWorldSystem.js's pipeline diagram: "Navigation Area/Layer" and
  * "Agent Radius / Size" are the last two transforms before "Final
  * Walkable Navigation", both applied here on top of the shared base
  * layer.
@@ -294,11 +321,15 @@ function areaCostsSignature(navWorld) {
  * @param {number} [areaMask] bitmask of allowed area slots, default
  *   0xffff (every area allowed) so existing radius-only callers are
  *   unaffected.
+ * @param {number[]|null} [agentAreaCosts] optional per-agent cost
+ *   override (NavAgent2D.areaCosts) — see getNavAreaCost's header.
+ *   null (default) means "use NavWorld2D.areaCosts for every area",
+ *   so existing callers that never pass this are unaffected.
  */
-export function getAgentNavLayer(navWorld, radius, areaMask = 0xffff) {
+export function getAgentNavLayer(navWorld, radius, areaMask = 0xffff, agentAreaCosts = null) {
   const rt = getNavWorldRuntime(navWorld);
-  const key = radiusCacheKey(radius, areaMask);
-  const currentCostSignature = areaCostsSignature(navWorld);
+  const key = radiusCacheKey(radius, areaMask, agentAreaCosts);
+  const currentCostSignature = areaCostsSignature(navWorld, agentAreaCosts);
   let layer = rt.radiusLayers.get(key);
   if (layer && layer.areaCostsSignature === currentCostSignature) return layer;
   if (layer) rt.radiusLayers.delete(key);
@@ -362,7 +393,7 @@ export function getAgentNavLayer(navWorld, radius, areaMask = 0xffff) {
   // a second cross-reference back into rt.area on every A* step.
   const cost = new Float32Array(count);
   for (let i = 0; i < count; i++) {
-    cost[i] = getNavAreaCost(navWorld, rt.area[i]);
+    cost[i] = getNavAreaCost(navWorld, rt.area[i], agentAreaCosts);
   }
 
   layer = {
@@ -386,10 +417,10 @@ export function getAgentNavLayer(navWorld, radius, areaMask = 0xffff) {
   return layer;
 }
 
-export function navRuntimeCacheStats(navWorld, radius = 0, areaMask = 0xffff) {
+export function navRuntimeCacheStats(navWorld, radius = 0, areaMask = 0xffff, agentAreaCosts = null) {
   const rt = RUNTIME.get(navWorld);
   if (!rt) return { cachedPaths: 0, cells: 0, cols: 0, rows: 0, radiusLayers: 0 };
-  const layer = rt.radiusLayers.get(radiusCacheKey(radius, areaMask));
+  const layer = rt.radiusLayers.get(radiusCacheKey(radius, areaMask, agentAreaCosts));
   return {
     cachedPaths: layer ? layer.pathCache.size : 0,
     cells: rt.cols * rt.rows,

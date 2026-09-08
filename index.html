@@ -3,11 +3,21 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ZenEngine Hub</title>
+    <title>Vaelis Hub</title>
 
     <link rel="manifest" href="manifest.webmanifest">
     <meta name="theme-color" content="#07070b">
-    <link rel="icon" href="icons/icon-192.png" type="image/png">
+    <!-- Root favicon.ico is the classic universal fallback browsers/
+         crawlers check by convention even without a <link> tag, and is
+         what Google Search's own guidance points at for homepage
+         favicon discovery (see developers.google.com/search/docs/
+         appearance/favicon-in-search). The explicit rel="icon" links
+         below are what modern browsers actually use for the tab icon;
+         both point at the same source image so hub and editor always
+         match. -->
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="icon" href="icons/icon-48.png" type="image/png" sizes="48x48">
+    <link rel="icon" href="icons/icon-192.png" type="image/png" sizes="192x192">
     <link rel="apple-touch-icon" href="icons/icon-512.png">
 
     <link href="css/fonts/fonts.css" rel="stylesheet">

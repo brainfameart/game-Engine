@@ -368,6 +368,10 @@ body.show-component-notes .static-body-note{display:block;}
 .asset-item{display:flex;flex-direction:column;align-items:center;width:70px;gap:4px;cursor:grab;}
 .asset-thumb{width:60px;height:60px;background:#333;border:1px solid #202020;border-radius:2px;display:flex;align-items:center;justify-content:center;box-shadow:0 1px 2px rgba(0,0,0,.1);position:relative;overflow:hidden;color:#aaa;}
 .asset-item:hover .asset-thumb{border-color:#2C5D87;}
+/* Script assets in the bottom panel's Scripts folder use a custom
+   thumbnail image instead of the generic "code" glyph icon other
+   asset kinds fall back to. */
+.asset-thumb-script{background-image:url(../assets/script-thumb.webp);background-size:cover;background-position:center;}
 .asset-ext{position:absolute;bottom:0;right:0;background:#222;color:#ccc;font-size:8px;padding:0 4px;border-top:1px solid #202020;border-left:1px solid #202020;}
 .asset-label{font-size:11px;color:#ccc;width:100%;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;border-radius:2px;}
 .asset-item:hover .asset-label{color:#eee;background:#2C5D87;padding:0 4px;}

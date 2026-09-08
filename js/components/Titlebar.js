@@ -15,7 +15,7 @@ window.ZenTitlebar = {
 
         const brand = el('div', { class: 'tb-brand' }, [
             el('span', { html: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v6M12 17v6M4.2 4.2l4.2 4.2M15.5 15.5l4.2 4.2M1 12h6M17 12h6M4.2 19.8l4.2-4.2M15.5 8.5l4.2-4.2"/></svg>' }),
-            el('span', {}, ['Zen', el('strong', {}, ['Engine']), ' Hub'])
+            el('span', {}, ['Vaelis Hub'])
         ]);
 
         // Left spacer mirrors the width of the right-side slot so the
@@ -24,7 +24,7 @@ window.ZenTitlebar = {
         const side = el('div', { class: 'tb-side' }, canInstall ? [
             el('button', {
                 class: 'btn btn-ghost btn-install',
-                title: 'Install ZenEngine as an app',
+                title: 'Install Vaelis as an app',
                 onClick: () => window.ZenPWA.promptInstall()
             }, [
                 el('span', { html: '<svg data-lucide="download"></svg>' }),

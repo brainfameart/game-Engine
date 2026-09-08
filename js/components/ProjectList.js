@@ -18,7 +18,7 @@ window.ZenProjectList = {
             return window.ZenEmptyState.render({
                 icon: 'film',
                 title: 'No projects yet',
-                desc: 'Create your first project to start building in ZenEngine.',
+                desc: 'Create your first project to start building in Vaelis.',
                 actionLabel: 'Start new project',
                 onAction: () => window.ZenStore.openModal()
             });

@@ -1,11 +1,13 @@
 /**
  * runtime/prefabs/PrefabRegistry.js
  *
- * Plain-data catalogue of prefabs: { id, name, sceneData }, where
- * sceneData is one serialized entity (see SceneSerializer.serializeEntity)
- * — the prefab's own canonical component data. This is what backs the
- * editor's "Prefabs" folder in the Project panel and the drag source
- * for placing prefab instances into a scene.
+ * Plain-data catalogue of prefabs: { id, name, sceneData, thumbnail },
+ * where sceneData is one serialized entity (see
+ * SceneSerializer.serializeEntity) — the prefab's own canonical
+ * component data — and thumbnail is an optional dataUrl snapshot of
+ * the source entity's sprite at creation time (null if it had none).
+ * This is what backs the editor's "Prefabs" folder in the Project
+ * panel and the drag source for placing prefab instances into a scene.
  *
  * Mirrors AssetRegistry.js's shape/conventions on purpose: a single
  * project-wide Map, shared by every scene, plain JSON only (so it can
@@ -37,8 +39,10 @@
  */
 
 import { serializeEntity, instantiateEntity } from "../scene/SceneSerializer.js";
+import { getSpriteAsset } from "../assets/AssetRegistry.js";
+import { SPRITE_RENDERER } from "../components/SpriteRenderer.js";
 
-/** @type {Map<string, { id: string, name: string, sceneData: object }>} */
+/** @type {Map<string, { id: string, name: string, sceneData: object, thumbnail: string|null }>} */
 const _prefabs = new Map();
 
 let _nextPrefabId = 1;
@@ -77,9 +81,35 @@ export function createPrefabFromEntity(entity, name) {
   // instantiatePrefab() below instead.
   sceneData.prefabId = null;
   sceneData.prefabOverrides = {};
-  const record = { id, name: (name || entity.name || "Prefab").trim() || "Prefab", sceneData };
+  // Thumbnail is a one-time snapshot of whatever sprite the source
+  // entity was showing at creation time, NOT a live reference — a
+  // prefab with no SpriteRenderer (or one whose spriteKey doesn't
+  // resolve, e.g. a Light or Collider2D-only entity) simply gets no
+  // thumbnail, and the editor falls back to the generic "box" icon for
+  // it (see BottomPanel.js's Prefabs folder rendering). Resolved via
+  // AssetRegistry's dataUrl the exact same way sprite assets already
+  // supply their own thumbnail, so no new image-storage mechanism is
+  // needed here.
+  const thumbnail = resolveThumbnail(sceneData);
+  const record = { id, name: (name || entity.name || "Prefab").trim() || "Prefab", sceneData, thumbnail };
   _prefabs.set(id, record);
   return record;
+}
+
+/**
+ * Looks up the dataUrl for whatever sprite (if any) a serialized
+ * entity's SpriteRenderer component points at. Returns null rather than
+ * throwing for entities with no SpriteRenderer, an empty spriteKey, or
+ * a spriteKey that no longer resolves to anything in AssetRegistry.
+ * @param {object} sceneData
+ * @returns {string|null}
+ */
+export function resolveThumbnail(sceneData) {
+  const spriteComp = sceneData.components && sceneData.components[SPRITE_RENDERER];
+  const spriteKey = spriteComp && spriteComp.spriteKey;
+  if (!spriteKey) return null;
+  const asset = getSpriteAsset(spriteKey);
+  return asset ? asset.dataUrl : null;
 }
 
 export function getPrefab(id) {
@@ -168,14 +198,14 @@ export function clearAllPrefabs() {
  * counter past every restored id so a NEW prefab created after loading
  * never collides with one just restored from disk (same reasoning as
  * World.deserializeScene's entity/folder id-counter bump).
- * @param {Array<{id:string,name:string,sceneData:object}>} records
+ * @param {Array<{id:string,name:string,sceneData:object,thumbnail:(string|null)}>} records
  */
 export function restoreProjectPrefabs(records) {
   _prefabs.clear();
   let maxId = 0;
   for (const r of records || []) {
     if (!r || !r.id) continue;
-    _prefabs.set(r.id, { id: r.id, name: r.name || "Prefab", sceneData: r.sceneData || {} });
+    _prefabs.set(r.id, { id: r.id, name: r.name || "Prefab", sceneData: r.sceneData || {}, thumbnail: r.thumbnail || null });
     const n = parseInt(String(r.id).replace("prefab", ""), 10);
     if (!Number.isNaN(n) && n > maxId) maxId = n;
   }

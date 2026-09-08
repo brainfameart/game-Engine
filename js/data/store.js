@@ -27,6 +27,7 @@
         projects: loadProjects(),
         searchQuery: '',
         modalOpen: false,
+        renamingProjectId: null,     // id of the project card currently showing its rename input, or null
         selectedTemplateId: window.ZenTemplates.find(t => t.default)?.id || window.ZenTemplates[0].id
     };
 
@@ -66,6 +67,25 @@
             if (!p) return;
             p.lastOpened = Date.now();
             persist();
+            notify();
+        },
+        startRename(id) {
+            state.renamingProjectId = id;
+            notify();
+        },
+        cancelRename() {
+            state.renamingProjectId = null;
+            notify();
+        },
+        renameProject(id, name) {
+            const p = state.projects.find(p => p.id === id);
+            state.renamingProjectId = null;
+            if (!p) { notify(); return; }
+            const trimmed = (name || '').trim();
+            if (trimmed && trimmed !== p.name) {
+                p.name = trimmed;
+                persist();
+            }
             notify();
         },
         deleteProject(id) {

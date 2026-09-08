@@ -1,6 +1,6 @@
 {
-  "name": "ZenEngine Hub",
-  "short_name": "ZenEngine",
+  "name": "Vaelis Hub",
+  "short_name": "Vaelis",
   "description": "Browser-based 2D game engine — projects, editor and player.",
   "start_url": "/index.html",
   "scope": "/",

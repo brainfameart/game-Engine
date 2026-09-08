@@ -83,7 +83,7 @@ import { COLLIDER_2D } from "../components/Collider2D.js";
 import { RIGIDBODY_2D, BodyType } from "../components/Rigidbody2D.js";
 import { NAV_WORLD_2D, navCellKey, getAgentNavLayer } from "../components/NavWorld2D.js";
 import { NAV_AGENT_2D } from "../components/NavAgent2D.js";
-import { findGridPath, smoothGridPath } from "../pathfinding/AStar.js";
+import { findGridPath, smoothGridPath, nearestWalkable } from "../pathfinding/AStar.js";
 import { bakeNavWorld } from "../pathfinding/NavWorldBaker.js";
 
 export class NavWorldSystem extends System {
@@ -233,14 +233,18 @@ export class NavWorldSystem extends System {
    *   (see NavAgent2D.area's header) -- default 0xffff (every area
    *   allowed). A route will never cross a cell whose area isn't in
    *   this mask, same as Unity's NavMeshAgent.areaMask.
+   * @param {number[]|null} [agentAreaCosts] optional per-agent cost
+   *   override (NavAgent2D.areaCosts) -- default null, meaning "use the
+   *   NavWorld2D's own area costs for every area", so existing callers
+   *   are unaffected. See getNavAreaCost's header for the fallback rule.
    */
-  findPath(navWorldEntity, startX, startY, goalX, goalY, radius = 0, areaMask = 0xffff) {
+  findPath(navWorldEntity, startX, startY, goalX, goalY, radius = 0, areaMask = 0xffff, agentAreaCosts = null) {
     const navWorld = navWorldEntity.getComponent(NAV_WORLD_2D);
     const start = this.worldToCell(navWorldEntity, startX, startY);
     const goal = this.worldToCell(navWorldEntity, goalX, goalY);
-    const gridPath = findGridPath(navWorld, start.col, start.row, goal.col, goal.row, radius, areaMask);
+    const gridPath = findGridPath(navWorld, start.col, start.row, goal.col, goal.row, radius, areaMask, agentAreaCosts);
     if (!gridPath) return null;
-    const smoothed = smoothGridPath(navWorld, gridPath, radius, areaMask);
+    const smoothed = smoothGridPath(navWorld, gridPath, radius, areaMask, agentAreaCosts);
     const startWasWalkable = navWorld.cells[navCellKey(start.col, start.row)] === true;
     const goalWasWalkable = navWorld.cells[navCellKey(goal.col, goal.row)] === true;
     const firstCell = gridPath[0];
@@ -292,7 +296,7 @@ export class NavWorldSystem extends System {
     const agent = agentEntity.getComponent(NAV_AGENT_2D);
     const transform = agentEntity.getComponent(TRANSFORM);
     if (!agent || !transform) return null;
-    return this.findPath(navWorldEntity, transform.x, transform.y, goalX, goalY, agent.radius, agent.area);
+    return this.findPath(navWorldEntity, transform.x, transform.y, goalX, goalY, agent.radius, agent.area, agent.areaCosts);
   }
 
   /**
@@ -305,14 +309,44 @@ export class NavWorldSystem extends System {
    * route through for the same radius+mask, rather than recomputing the
    * mask check separately here.
    */
-  isWalkableForAgent(navWorldEntity, worldX, worldY, radius, areaMask = 0xffff) {
+  isWalkableForAgent(navWorldEntity, worldX, worldY, radius, areaMask = 0xffff, agentAreaCosts = null) {
     const navWorld = navWorldEntity.getComponent(NAV_WORLD_2D);
     const { col, row } = this.worldToCell(navWorldEntity, worldX, worldY);
-    const layer = getAgentNavLayer(navWorld, radius, areaMask);
+    const layer = getAgentNavLayer(navWorld, radius, areaMask, agentAreaCosts);
     const cols = Math.max(1, Math.ceil(navWorld.boundsWidth / navWorld.cellSize));
     if (col < 0 || row < 0 || col >= cols) return false;
     const idx = row * cols + col;
     return idx < layer.walkable.length && layer.walkable[idx] === 1;
+  }
+
+  /**
+   * Finds the nearest walkable world-space point for a given agent
+   * radius+areaMask, expanding outward ring by ring from (worldX,worldY)
+   * — same underlying search findPath()'s own start/goal snapping uses
+   * (see AStar.js's nearestWalkable), just exposed directly and with a
+   * wider default search ring, for RESCUING an agent that has ended up
+   * standing somewhere its own area mask/radius disallows (see
+   * ScriptAPI.js's navMoveToward()/navDriveToward() "stuck inside a
+   * disallowed area" recovery — this is what they call to find which
+   * way to nudge out). findPath()'s own snap only needs to bridge a
+   * few cells (e.g. a start point that landed just off a path); escaping
+   * a whole disallowed zone can need a much larger radius, hence the
+   * bigger default maxRing here rather than reusing findPath()'s.
+   * @returns {{x:number,y:number}|null} null if nothing walkable was
+   *   found within maxRing cells (the zone is bigger than the search, or
+   *   nothing on the map is walkable for this radius/area at all).
+   */
+  nearestWalkablePointForAgent(navWorldEntity, worldX, worldY, radius, areaMask = 0xffff, maxRing = 24, agentAreaCosts = null) {
+    const navWorld = navWorldEntity.getComponent(NAV_WORLD_2D);
+    const layer = getAgentNavLayer(navWorld, radius, areaMask, agentAreaCosts);
+    const rt = {
+      cols: Math.max(1, Math.ceil(navWorld.boundsWidth / navWorld.cellSize)),
+      rows: Math.max(1, Math.ceil(navWorld.boundsHeight / navWorld.cellSize)),
+    };
+    const { col, row } = this.worldToCell(navWorldEntity, worldX, worldY);
+    const found = nearestWalkable(rt, layer, col, row, maxRing);
+    if (!found) return null;
+    return this.cellToWorld(navWorldEntity, found.col, found.row);
   }
 
   /**

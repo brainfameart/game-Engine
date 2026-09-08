@@ -47,28 +47,180 @@
 // GLSL ES 1.00 requires compile-time-constant array sizes, so lights/
 // occluders get a fixed-size cap plus an explicit count uniform that
 // tells the shader how much of each array is actually populated.
-export const MAX_LIGHTS = 32;
-export const MAX_OCCLUDERS = 24;
+//
+// THESE ARE UPPER-BOUND DEFAULTS, NOT GUARANTEED-SAFE SIZES. The GLSL
+// ES 1.00 spec only guarantees MAX_FRAGMENT_UNIFORM_VECTORS >= 16 in
+// principle, but every real WebGL1 implementation guarantees >= 1024
+// (the actual figure that produced "PixiJS Error: Could not initialize
+// shader" / "FRAGMENT shader uniforms count exceeds
+// MAX_FRAGMENT_UNIFORM_VECTORS" on lower-end/integrated GPUs — those
+// devices report the guaranteed 1024, not the much higher figure a
+// typical dev machine's discrete GPU reports, and the fixed defaults
+// below (particularly uPolyPoints at MAX_LIGHTS * FREEFORM_STRIDE = 544
+// vec4 slots on their own) blew well past it). resolveCaps() below
+// queries the ACTUAL device budget via
+// gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS) and scales these
+// down to fit BEFORE the shader source is ever built, so the shader
+// that gets compiled always fits the device it's compiling on instead
+// of a fixed worst-case guess. buildLightTextureFilter(gl) is the only
+// place these defaults are read directly; everywhere else (including
+// this shader's own template literals below) takes its sizes from the
+// resolved caps object that function produces.
+export const DEFAULT_MAX_LIGHTS = 32;
+export const DEFAULT_MAX_OCCLUDERS = 24;
 export const MAX_RAYMARCH_STEPS = 48;
 // Freeform lights (typeId 5): each light's polygon outline is uploaded
 // as up to this many LOCAL-space {x,y} points, flattened into one big
 // per-light-slot array (see uPolyPoints below) rather than a real 2D
 // uniform array, since GLSL ES 1.00 (WebGL1) has no dynamic-length
-// arrays-of-arrays. 16 points is generous for a hand-drawn shape while
-// keeping the uniform budget (32 lights * 16 points * 2 floats = 1024
-// floats) well within typical WebGL1 fragment-uniform limits.
-export const MAX_FREEFORM_POINTS = 16;
+// arrays-of-arrays.
+export const DEFAULT_MAX_FREEFORM_POINTS = 16;
 
-// Each light gets MAX_FREEFORM_POINTS + 1 slots in uPolyPoints: the actual
-// polygon points plus a duplicate of the first point right after the last.
-// This lets the shader iterate polygon edges as simple (p, p+1) pairs
-// including the wrap-around (last->first) edge, avoiding computed array
-// indices -- GLSL ES 1.00 only allows const/loop-variable expressions as
-// array indices, so the old helper functions that took `base` (a function
-// parameter) and `j` (a computed ternary) as indices failed to compile.
-export const FREEFORM_STRIDE = MAX_FREEFORM_POINTS + 1;
+// Roughly how many vec4-equivalent uniform slots ONE light/occluder
+// "costs" in this shader (see the uLight*/uOcc* uniform declarations
+// below) — used by resolveCaps() to size MAX_LIGHTS/MAX_OCCLUDERS/
+// MAX_FREEFORM_POINTS down to fit an actual device budget instead of
+// guessing. Kept as simple named constants (rather than derived by
+// parsing the shader source) so they're easy to keep in sync by eye
+// with the uniform list whenever a uLight*/uOcc* line is added.
+// Per-light cost: pos, typeId, color, intensity, radius, angle,
+// rotation, width, height, castsShadows, shadowStrength, shadowColor,
+// shadowReach, pointCount = 14 fixed slots, PLUS FREEFORM_STRIDE slots
+// for uPolyPoints (computed separately since it depends on the
+// freeform-points cap, which resolveCaps() also has to solve for).
+const PER_LIGHT_FIXED_SLOTS = 14;
+// Per-occluder cost: pos, halfExtents, rotation, opacity, length,
+// softness = 6 slots.
+const PER_OCCLUDER_SLOTS = 6;
+// Everything else this shader/PIXI itself uses regardless of light/
+// occluder count — projectionMatrix, inputSize, outputFrame,
+// uStageOffset/Scale, uAmbientDarkness, uShadowMode, uRaymarchSteps,
+// uTime, uLightCount, uOccluderCount, plus headroom for whatever
+// PIXI's own filter plumbing (samplers etc.) adds — kept conservative
+// on purpose since undershooting the real fixed overhead is exactly
+// what caused this bug the first time.
+const FIXED_OVERHEAD_SLOTS = 32;
+// Floor so a genuinely tiny device budget still gets a usable scene
+// (a couple of lights, no shadows-casting occluders) instead of
+// solving down to zero and silently drawing nothing.
+const MIN_LIGHTS = 4;
+const MIN_OCCLUDERS = 4;
+const MIN_FREEFORM_POINTS = 4;
 
-const VERTEX_SRC = `
+/**
+ * Queries the real GPU's fragment-uniform budget and scales
+ * MAX_LIGHTS/MAX_OCCLUDERS/MAX_FREEFORM_POINTS down (never up past the
+ * defaults above) so the shader this module builds is guaranteed to
+ * fit — this is the actual fix for "Could not initialize shader" /
+ * "uniforms count exceeds MAX_FRAGMENT_UNIFORM_VECTORS" on lower-end
+ * or integrated GPUs, which report a much smaller budget than a
+ * typical dev machine's discrete GPU.
+ *
+ * gl: a WebGLRenderingContext/WebGL2RenderingContext, normally
+ * pixiApp.renderer.gl. Pass null/undefined (e.g. a non-WebGL renderer,
+ * or a context that doesn't expose gl) to fall back to the fixed
+ * defaults unchanged — same behavior as before this fix, for the rare
+ * environment this query itself can't run in.
+ *
+ * Solves for the largest MAX_LIGHTS (keeping MAX_OCCLUDERS/
+ * MAX_FREEFORM_POINTS at their defaults) that fits the budget; if even
+ * MIN_LIGHTS lights won't fit at default occluders/freeform-points, it
+ * then scales occluders and freeform-points down too, in that order,
+ * before finally giving up and using the floor values for all three
+ * (which — see FIXED_OVERHEAD_SLOTS — should only happen on a budget
+ * far below any real device's actual guaranteed minimum).
+ */
+export function resolveCaps(gl) {
+  let budget = null;
+  if (gl) {
+    try {
+      const raw = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
+      if (typeof raw === "number" && isFinite(raw) && raw > 0) budget = raw;
+    } catch (err) {
+      // gl not a real WebGL context, or getParameter unsupported —
+      // fall through to the unscaled defaults below.
+    }
+  }
+  if (budget === null) {
+    return {
+      MAX_LIGHTS: DEFAULT_MAX_LIGHTS,
+      MAX_OCCLUDERS: DEFAULT_MAX_OCCLUDERS,
+      MAX_FREEFORM_POINTS: DEFAULT_MAX_FREEFORM_POINTS,
+    };
+  }
+
+  const available = Math.max(0, budget - FIXED_OVERHEAD_SLOTS);
+
+  const costFor = (lights, occluders, points) =>
+    lights * (PER_LIGHT_FIXED_SLOTS + (points + 1)) + occluders * PER_OCCLUDER_SLOTS;
+
+  // Fits comfortably at defaults? Nothing to scale down.
+  if (costFor(DEFAULT_MAX_LIGHTS, DEFAULT_MAX_OCCLUDERS, DEFAULT_MAX_FREEFORM_POINTS) <= available) {
+    return {
+      MAX_LIGHTS: DEFAULT_MAX_LIGHTS,
+      MAX_OCCLUDERS: DEFAULT_MAX_OCCLUDERS,
+      MAX_FREEFORM_POINTS: DEFAULT_MAX_FREEFORM_POINTS,
+    };
+  }
+
+  // Step 1: shrink MAX_LIGHTS alone, occluders/points held at default.
+  let occluders = DEFAULT_MAX_OCCLUDERS;
+  let points = DEFAULT_MAX_FREEFORM_POINTS;
+  let lights = Math.floor(available / (PER_LIGHT_FIXED_SLOTS + (points + 1)));
+  lights = Math.min(DEFAULT_MAX_LIGHTS, lights);
+
+  // Step 2: still doesn't fit MIN_LIGHTS at those occluders/points —
+  // shrink occluders next, lights held at the floor.
+  if (lights < MIN_LIGHTS) {
+    lights = MIN_LIGHTS;
+    const remaining = available - lights * (PER_LIGHT_FIXED_SLOTS + (points + 1));
+    occluders = Math.max(0, Math.floor(remaining / PER_OCCLUDER_SLOTS));
+    occluders = Math.min(DEFAULT_MAX_OCCLUDERS, occluders);
+  }
+
+  // Step 3: still doesn't fit even with 0 occluders — shrink freeform
+  // points (which are usually the single biggest line item) next.
+  if (lights * (PER_LIGHT_FIXED_SLOTS + (points + 1)) + occluders * PER_OCCLUDER_SLOTS > available) {
+    occluders = MIN_OCCLUDERS;
+    const remainingForPoints = available - lights * PER_LIGHT_FIXED_SLOTS - occluders * PER_OCCLUDER_SLOTS;
+    points = Math.floor(remainingForPoints / lights) - 1;
+    points = Math.max(MIN_FREEFORM_POINTS, Math.min(DEFAULT_MAX_FREEFORM_POINTS, points));
+  }
+
+  // Absolute floor: an extremely small reported budget (well below any
+  // real device's guaranteed minimum) still gets a shader that
+  // compiles, just with very few lights/occluders/points, rather than
+  // this function producing 0-or-negative sizes.
+  lights = Math.max(MIN_LIGHTS, lights);
+  occluders = Math.max(MIN_OCCLUDERS, occluders);
+  points = Math.max(MIN_FREEFORM_POINTS, points);
+
+  return { MAX_LIGHTS: lights, MAX_OCCLUDERS: occluders, MAX_FREEFORM_POINTS: points };
+}
+
+/**
+ * Builds the {VERTEX_SRC, FRAGMENT_SRC} shader source pair for a given
+ * resolved caps object (see resolveCaps()). Sizes every uLight-/uOcc-
+ * prefixed uniform array — and every GLSL loop bound over MAX_LIGHTS/
+ * MAX_OCCLUDERS/MAX_FREEFORM_POINTS — to the caps actually passed in,
+ * so the source this returns is only ever as big as the device that
+ * asked for it needs it to be. Pure string templating, no GL calls —
+ * safe to call with any caps object, including in a test/Node
+ * environment with no WebGL at all.
+ */
+function buildShaderSource(caps) {
+  const MAX_LIGHTS = caps.MAX_LIGHTS;
+  const MAX_OCCLUDERS = caps.MAX_OCCLUDERS;
+  const MAX_FREEFORM_POINTS = caps.MAX_FREEFORM_POINTS;
+  // Each light gets MAX_FREEFORM_POINTS + 1 slots in uPolyPoints: the
+  // actual polygon points plus a duplicate of the first point right
+  // after the last. This lets the shader iterate polygon edges as
+  // simple (p, p+1) pairs including the wrap-around (last->first)
+  // edge, avoiding computed array indices -- GLSL ES 1.00 only allows
+  // const/loop-variable expressions as array indices.
+  const FREEFORM_STRIDE = MAX_FREEFORM_POINTS + 1;
+
+  const VERTEX_SRC = `
 attribute vec2 aVertexPosition;
 
 uniform mat3 projectionMatrix;
@@ -94,7 +246,7 @@ void main(void) {
 }
 `;
 
-const FRAGMENT_SRC = `
+  const FRAGMENT_SRC = `
 precision mediump float;
 
 varying vec2 vTextureCoord;
@@ -572,14 +724,38 @@ void main(void) {
 }
 `;
 
+  return { VERTEX_SRC, FRAGMENT_SRC, FREEFORM_STRIDE };
+}
+
 /**
  * Builds a fresh PIXI.Filter that renders the light buffer described
  * above. Applied to a dedicated offscreen container (see
  * LightingSystem.js's _renderLightTexture) rather than the sprite
  * container — this filter has zero knowledge of sprites and must never
  * be applied directly to gameContentContainer.
+ *
+ * gl: the device's WebGLRenderingContext (normally
+ * pixiApp.renderer.gl), used to size the shader's uniform arrays to
+ * what THIS device's GPU actually supports (see resolveCaps() above) —
+ * this is what makes the lighting shader compile on lower-end/
+ * integrated GPUs that report a smaller MAX_FRAGMENT_UNIFORM_VECTORS
+ * than the DEFAULT_MAX_LIGHTS/OCCLUDERS/FREEFORM_POINTS above assume.
+ * Optional: omitting it (or passing a context resolveCaps can't query)
+ * falls back to the fixed defaults, same as before this fix.
+ *
+ * The returned filter carries its resolved caps as
+ * filter.lightingCaps = { MAX_LIGHTS, MAX_OCCLUDERS, MAX_FREEFORM_POINTS }
+ * so LightingSystem.js can clamp how many lights/occluders it uploads
+ * (and warn past that) using the SAME numbers the shader was actually
+ * built with, instead of the fixed module constants this file used to
+ * export for that purpose.
  */
-export function buildLightTextureFilter() {
+export function buildLightTextureFilter(gl) {
+  const caps = resolveCaps(gl);
+  const MAX_LIGHTS = caps.MAX_LIGHTS;
+  const MAX_OCCLUDERS = caps.MAX_OCCLUDERS;
+  const { VERTEX_SRC, FRAGMENT_SRC, FREEFORM_STRIDE } = buildShaderSource(caps);
+
   const uniforms = {
     uAmbientDarkness: 0.65,
     uShadowMode: 0,
@@ -616,7 +792,8 @@ export function buildLightTextureFilter() {
   };
 
   const filter = new PIXI.Filter(VERTEX_SRC, FRAGMENT_SRC, uniforms);
-  filter.resolution = window.devicePixelRatio || 1;
+  filter.resolution = (window.__zenginePixiApp && window.__zenginePixiApp.renderer && window.__zenginePixiApp.renderer.resolution) || Math.min(2, window.devicePixelRatio || 1);
   filter.autoFit = false;
+  filter.lightingCaps = caps;
   return filter;
 }

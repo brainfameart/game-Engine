@@ -7,6 +7,7 @@
  */
 
 import { createGame } from "../runtime/index.js";
+import { getSafeRendererResolution, prepareGameCanvas } from "../runtime/core/MobileViewport.js";
 import { RenderSystem } from "../runtime/systems/RenderSystem.js";
 import { CAMERA } from "../runtime/components/Camera.js";
 import { TRANSFORM } from "../runtime/components/Transform.js";
@@ -200,8 +201,10 @@ function setupTouchTestOverlay(game, pixiApp) {
     // Inverts the same screen-pixel <-> canvas-backing-buffer math
     // ScriptAPI's attachPointerInput/toCoords() uses, so a dot lands
     // exactly under the finger that produced its screenX/screenY.
-    const sx = rect.width > 0 ? rect.width / canvas.width : 1;
-    const sy = rect.height > 0 ? rect.height / canvas.height : 1;
+    const logicalW = pixiApp.screen ? pixiApp.screen.width : (canvas.clientWidth || rect.width);
+    const logicalH = pixiApp.screen ? pixiApp.screen.height : (canvas.clientHeight || rect.height);
+    const sx = logicalW > 0 ? rect.width / logicalW : 1;
+    const sy = logicalH > 0 ? rect.height / logicalH : 1;
 
     setDotCount(touchRef.length);
     for (let i = 0; i < touchRef.length; i++) {
@@ -247,9 +250,11 @@ function setupTouchTestOverlay(game, pixiApp) {
 async function boot() {
   const mount = document.getElementById("game-canvas");
 
+  const initialWidth = Math.max(1, mount.clientWidth || window.innerWidth || 800);
+  const initialHeight = Math.max(1, mount.clientHeight || window.innerHeight || 600);
   const pixiApp = new PIXI.Application({
-    width: mount.clientWidth || 800,
-    height: mount.clientHeight || 600,
+    width: initialWidth,
+    height: initialHeight,
     backgroundColor: 0x282828,
     // Confirmed via debug.show()'s SYSTEM TIMES + a temporary
     // antialias:false test that the frame-rate ceiling on the
@@ -258,9 +263,10 @@ async function boot() {
     // sprite/shape edges render smooth instead of jagged.
     antialias: true,
     autoDensity: true,
-    resolution: window.devicePixelRatio || 1,
+    resolution: getSafeRendererResolution(initialWidth, initialHeight),
   });
   mount.appendChild(pixiApp.view);
+  prepareGameCanvas(pixiApp.view);
 
   // gameId namespaces the `save` global's IndexedDB database (see
   // runtime/index.js and runtime/scripting/SaveStore.js) so this
@@ -306,9 +312,16 @@ async function boot() {
     RenderSystem.applyBackgroundColor(pixiApp, mainCameraEntity.getComponent(CAMERA).backgroundColor);
   }
 
-  window.addEventListener("resize", () => {
-    pixiApp.renderer.resize(mount.clientWidth, mount.clientHeight);
-  });
+  function resizeGameToMount() {
+    const rect = mount.getBoundingClientRect();
+    const width = Math.max(1, Math.round(rect.width || mount.clientWidth || window.innerWidth));
+    const height = Math.max(1, Math.round(rect.height || mount.clientHeight || window.innerHeight));
+    pixiApp.renderer.resize(width, height);
+  }
+
+  window.addEventListener("resize", resizeGameToMount, { passive: true });
+  if (window.visualViewport) window.visualViewport.addEventListener("resize", resizeGameToMount, { passive: true });
+  resizeGameToMount();
 
   game.loop.start();
 

@@ -71,11 +71,7 @@ import { LIGHTING_SETTINGS } from "../components/LightingSettings.js";
 import { LightingQuality, ShadowMode } from "./LightingQuality.js";
 import {
   buildLightTextureFilter,
-  MAX_LIGHTS,
-  MAX_OCCLUDERS,
   MAX_RAYMARCH_STEPS,
-  MAX_FREEFORM_POINTS,
-  FREEFORM_STRIDE,
 } from "./LightTextureShaderSource.js";
 import { buildSpriteLightFilter } from "./SpriteLightFilter.js";
 import { buildLightGlowFilter } from "./LightGlowFilter.js";
@@ -186,12 +182,36 @@ export class LightingSystem extends System {
    * reported through console.error (mirrored into the in-engine
    * Console panel by editor/state/ConsoleCapture.js) instead of
    * throwing out of the constructor and taking the whole engine down.
+   *
+   * Passes the real WebGL context (pixiApp.renderer.gl, when the
+   * renderer exposes one) so buildLightTextureFilter can size the
+   * shader's uniform arrays to what THIS device's GPU actually
+   * supports (see LightTextureShaderSource.js's resolveCaps()) — this
+   * is what makes the lighting shader compile on lower-end/integrated
+   * GPUs instead of only ever fitting a typical dev machine's discrete
+   * GPU and falling into this catch (silently disabling lighting for
+   * the whole session) on everything else. The resolved caps are
+   * stashed on this._lightingCaps so every other method that used to
+   * import fixed MAX_LIGHTS/MAX_OCCLUDERS/MAX_FREEFORM_POINTS reads
+   * the SAME numbers the shader currently running was actually built
+   * with.
    */
   _buildLightTextureFilterSafely() {
+    let gl = null;
     try {
-      return buildLightTextureFilter();
+      gl = (this.pixiApp && this.pixiApp.renderer && this.pixiApp.renderer.gl) || null;
+    } catch (err) {
+      // Some renderer types (e.g. a canvas fallback) don't expose
+      // .gl at all — fall through with gl left null, same as if no
+      // pixiApp were available yet.
+    }
+    try {
+      const filter = buildLightTextureFilter(gl);
+      this._lightingCaps = filter.lightingCaps;
+      return filter;
     } catch (err) {
       this._filterBroken = true;
+      this._lightingCaps = null;
       console.error("[Lighting] Failed to compile light-texture shader — lighting is disabled for this session:", err);
       return null;
     }
@@ -279,27 +299,27 @@ export class LightingSystem extends System {
       return;
     }
 
-    if (lightEntities.length > MAX_LIGHTS) {
+    if (lightEntities.length > this._lightingCaps.MAX_LIGHTS) {
       console.warn(
         "[Lighting] Scene has " +
           lightEntities.length +
-          " active lights but the shader only supports " +
-          MAX_LIGHTS +
+          " active lights but this device's shader only supports " +
+          this._lightingCaps.MAX_LIGHTS +
           " at once. The extra " +
-          (lightEntities.length - MAX_LIGHTS) +
-          " light(s) will be ignored — remove or disable some lights, or raise MAX_LIGHTS in LightTextureShaderSource.js."
+          (lightEntities.length - this._lightingCaps.MAX_LIGHTS) +
+          " light(s) will be ignored — remove or disable some lights. (This device's GPU reports a smaller uniform budget than some others, so this cap can vary by machine.)"
       );
     }
 
     const occluders = this._collectOccluders(world);
-    if (occluders.length > MAX_OCCLUDERS) {
+    if (occluders.length > this._lightingCaps.MAX_OCCLUDERS) {
       console.warn(
         "[Lighting] Scene has " +
           occluders.length +
-          " enabled Shadow Casters but the shader only supports " +
-          MAX_OCCLUDERS +
+          " enabled Shadow Casters but this device's shader only supports " +
+          this._lightingCaps.MAX_OCCLUDERS +
           " at once. The extra " +
-          (occluders.length - MAX_OCCLUDERS) +
+          (occluders.length - this._lightingCaps.MAX_OCCLUDERS) +
           " will not cast shadows."
       );
     }
@@ -317,8 +337,8 @@ export class LightingSystem extends System {
       this._fillLightUniforms(lightEntities, occluders, stageScale);
       this._fillOccluderUniforms(occluders, stageScale);
 
-      filter.uniforms.uLightCount = Math.min(MAX_LIGHTS, lightEntities.length);
-      filter.uniforms.uOccluderCount = Math.min(MAX_OCCLUDERS, occluders.length);
+      filter.uniforms.uLightCount = Math.min(this._lightingCaps.MAX_LIGHTS, lightEntities.length);
+      filter.uniforms.uOccluderCount = Math.min(this._lightingCaps.MAX_OCCLUDERS, occluders.length);
       filter.uniforms.uShadowMode = settings.shadowMode === ShadowMode.RAYMARCH ? 1 : 0;
       filter.uniforms.uRaymarchSteps = Math.min(MAX_RAYMARCH_STEPS, Math.max(1, settings.raymarchSteps));
       filter.uniforms.uAmbientDarkness = Math.min(1, Math.max(0, settings.ambientDarkness));
@@ -574,7 +594,7 @@ export class LightingSystem extends System {
    */
   _fillLightUniforms(lightEntities, occluders, stageScale) {
     const u = this._lightTextureFilter.uniforms;
-    const count = Math.min(MAX_LIGHTS, lightEntities.length);
+    const count = Math.min(this._lightingCaps.MAX_LIGHTS, lightEntities.length);
 
     for (let i = 0; i < count; i++) {
       const entity = lightEntities[i];
@@ -612,14 +632,16 @@ export class LightingSystem extends System {
 
       // Freeform polygon points, flattened into this light's slot of
       // the shared uPolyPoints array (see LightTextureShaderSource.js's
-      // MAX_FREEFORM_POINTS doc comment). Points beyond the cap are
-      // silently dropped rather than erroring — matches uLightCount's
-      // own "just stop uploading past the uniform budget" behavior.
+      // resolveCaps()/MAX_FREEFORM_POINTS doc comments — the cap is
+      // device-dependent, not a fixed constant). Points beyond the cap
+      // are silently dropped rather than erroring — matches
+      // uLightCount's own "just stop uploading past the uniform
+      // budget" behavior.
       const points = light.type === LightType.FREEFORM ? light.points || [] : null;
-      const pointCount = points ? Math.min(MAX_FREEFORM_POINTS, points.length) : 0;
+      const pointCount = points ? Math.min(this._lightingCaps.MAX_FREEFORM_POINTS, points.length) : 0;
       u.uLightPointCount[i] = pointCount;
       if (points) {
-        const base = i * FREEFORM_STRIDE;
+        const base = i * (this._lightingCaps.MAX_FREEFORM_POINTS + 1);
         for (let p = 0; p < pointCount; p++) {
           u.uPolyPoints[(base + p) * 2 + 0] = points[p].x;
           u.uPolyPoints[(base + p) * 2 + 1] = points[p].y;
@@ -658,7 +680,7 @@ export class LightingSystem extends System {
    */
   _fillOccluderUniforms(occluders, stageScale) {
     const u = this._lightTextureFilter.uniforms;
-    const count = Math.min(MAX_OCCLUDERS, occluders.length);
+    const count = Math.min(this._lightingCaps.MAX_OCCLUDERS, occluders.length);
     const invScale = 1 / Math.max(0.0001, stageScale || 1);
 
     for (let i = 0; i < count; i++) {

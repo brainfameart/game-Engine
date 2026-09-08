@@ -629,7 +629,16 @@ export async function exportProject(game, projectName, options) {
     compressionOptions: { level: 9 },
   });
   const safeName = (projectName || "untitled-project").trim().replace(/[^a-zA-Z0-9_-]+/g, "-").toLowerCase() || "untitled-project";
-  downloadBlob(blob, safeName + ".zip");
+  // .vs is Vaelis's own project file extension — the archive itself
+  // is still a completely ordinary zip (JSZip.generateAsync above
+  // never changes), just saved under a different extension so a
+  // project save reads as a distinct file type rather than a generic
+  // .zip. JSZip.loadAsync() in importProject() below reads by binary
+  // content, not filename, so this rename has zero effect on load —
+  // see the accept=".vs,.zip" input in Toolbar.js for the load side
+  // (.zip kept there too, so projects saved before this change still
+  // open normally).
+  downloadBlob(blob, safeName + ".vs");
   return { optimizeStats };
 }
 
@@ -663,14 +672,14 @@ export async function importProject(game, zipFile) {
 
   const manifestEntry = zip.file(MANIFEST_FILENAME);
   if (!manifestEntry) {
-    throw new Error("Not a valid ZenEngine project — missing manifest.json.");
+    throw new Error("Not a valid Vaelis project — missing manifest.json.");
   }
   const manifest = JSON.parse(await manifestEntry.async("string"));
 
   let versionWarning = null;
   if (manifest.engineVersion && compareVersions(manifest.engineVersion, ENGINE_VERSION) > 0) {
     versionWarning =
-      "This project was saved with ZenEngine " + manifest.engineVersion +
+      "This project was saved with Vaelis " + manifest.engineVersion +
       ", which is newer than the current engine (" + ENGINE_VERSION + "). " +
       "Some features may not load correctly. Consider updating the engine.";
   }

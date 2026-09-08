@@ -57,7 +57,12 @@ const NAV_AGENT_MEMBERS = new Set([
   "autoRepath", "repathInterval", "repathDistance",
   "avoidanceEnabled", "avoidancePriority",
   "collabEnabled", "collabGroupRadius",
+  "vehicleLookahead", "vehicleCornerLookahead", "vehicleObstacleLookahead",
+  "vehicleObstacleWidth", "vehicleSteerSmoothing", "vehicleSpeedSmoothing",
+  "vehicleCornerSlowdown", "vehicleObstacleBrake", "vehicleRecoveryTime",
+  "vehicleRecoveryReverseTime",
   "area",
+  "areaCosts",
   "currentPath", "currentPathIndex",
 ]);
 
@@ -100,6 +105,29 @@ export function createNavAgentAPI(entity) {
     get collabGroupRadius() { return _requireNavAgent(entity).collabGroupRadius; },
     set collabGroupRadius(v) { _requireNavAgent(entity).collabGroupRadius = Math.max(0, Number(v) || 0); },
 
+
+    // Car-only local driving planner knobs used by navDriveToward().
+    get vehicleLookahead() { return _requireNavAgent(entity).vehicleLookahead; },
+    set vehicleLookahead(v) { _requireNavAgent(entity).vehicleLookahead = Math.max(16, Number(v) || 16); },
+    get vehicleCornerLookahead() { return _requireNavAgent(entity).vehicleCornerLookahead; },
+    set vehicleCornerLookahead(v) { _requireNavAgent(entity).vehicleCornerLookahead = Math.max(16, Number(v) || 16); },
+    get vehicleObstacleLookahead() { return _requireNavAgent(entity).vehicleObstacleLookahead; },
+    set vehicleObstacleLookahead(v) { _requireNavAgent(entity).vehicleObstacleLookahead = Math.max(24, Number(v) || 24); },
+    get vehicleObstacleWidth() { return _requireNavAgent(entity).vehicleObstacleWidth; },
+    set vehicleObstacleWidth(v) { _requireNavAgent(entity).vehicleObstacleWidth = Math.max(4, Number(v) || 4); },
+    get vehicleSteerSmoothing() { return _requireNavAgent(entity).vehicleSteerSmoothing; },
+    set vehicleSteerSmoothing(v) { _requireNavAgent(entity).vehicleSteerSmoothing = Math.max(1, Number(v) || 1); },
+    get vehicleSpeedSmoothing() { return _requireNavAgent(entity).vehicleSpeedSmoothing; },
+    set vehicleSpeedSmoothing(v) { _requireNavAgent(entity).vehicleSpeedSmoothing = Math.max(1, Number(v) || 1); },
+    get vehicleCornerSlowdown() { return _requireNavAgent(entity).vehicleCornerSlowdown; },
+    set vehicleCornerSlowdown(v) { _requireNavAgent(entity).vehicleCornerSlowdown = Math.max(0.2, Math.min(1, Number(v) || 0.2)); },
+    get vehicleObstacleBrake() { return _requireNavAgent(entity).vehicleObstacleBrake; },
+    set vehicleObstacleBrake(v) { _requireNavAgent(entity).vehicleObstacleBrake = Math.max(0.2, Math.min(1.5, Number(v) || 0.2)); },
+    get vehicleRecoveryTime() { return _requireNavAgent(entity).vehicleRecoveryTime; },
+    set vehicleRecoveryTime(v) { _requireNavAgent(entity).vehicleRecoveryTime = Math.max(0.5, Number(v) || 0.5); },
+    get vehicleRecoveryReverseTime() { return _requireNavAgent(entity).vehicleRecoveryReverseTime; },
+    set vehicleRecoveryReverseTime(v) { _requireNavAgent(entity).vehicleRecoveryReverseTime = Math.max(0.35, Number(v) || 0.35); },
+
     // Bitmask of NavWorld2D area slots this agent is ALLOWED to path
     // through at all — same model as Unity's NavMeshAgent.areaMask. A
     // route never crosses a cell whose area bit isn't set here, no
@@ -114,6 +142,34 @@ export function createNavAgentAPI(entity) {
     //   this.navAgent.area = this.navAgent.area & ~(1 << 2); // disallow area 2
     get area() { return _requireNavAgent(entity).area; },
     set area(v) { _requireNavAgent(entity).area = (Number(v) || 0) & 0xffff; },
+
+    // Per-agent override of NavWorld2D.areaCosts — see
+    // components/NavAgent2D.js's areaCosts field header for the full
+    // "override just what you need, fall through to the world's cost
+    // for everything else" semantics. null (the default) means "use
+    // the world's cost for every area". Assigning an array here
+    // re-normalizes it exactly like the component constructor does
+    // (16 slots, non-finite/<=0 entries become null), so a script
+    // can safely write a short/sparse array and rely on the rest
+    // falling back to the world:
+    //   this.navAgent.areaCosts = [];       // no overrides (== null)
+    //   this.navAgent.areaCosts[2] = 5;      // WRONG — doesn't trigger
+    //                                        // the setter; read, mutate
+    //                                        // a copy, then reassign:
+    //   var costs = this.navAgent.areaCosts || [];
+    //   costs[2] = 5;
+    //   this.navAgent.areaCosts = costs;
+    get areaCosts() { return _requireNavAgent(entity).areaCosts; },
+    set areaCosts(v) {
+      const navAgent = _requireNavAgent(entity);
+      if (!Array.isArray(v)) { navAgent.areaCosts = null; return; }
+      const normalized = new Array(16).fill(null);
+      for (let i = 0; i < 16; i++) {
+        const n = Number(v[i]);
+        normalized[i] = Number.isFinite(n) && n > 0 ? n : null;
+      }
+      navAgent.areaCosts = normalized;
+    },
 
     // Read-only — see this file's header for why these aren't settable
     // directly.

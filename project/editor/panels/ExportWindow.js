@@ -18,6 +18,7 @@
 
 import { editorState } from "../state/EditorState.js";
 import { icon } from "../icons/IconLibrary.js";
+import { ANDROID_KEYGEN_SITE_URL, getActiveAndroidServer } from "../state/ServerConfig.js";
 
 /**
  * One entry per selectable/plannable export target. `comingSoon`
@@ -63,7 +64,14 @@ const PANEL_STYLE =
   "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);" +
   "background:#1e2330;border:1px solid #3a4560;border-radius:8px;" +
   "width:460px;max-height:80vh;display:flex;flex-direction:column;" +
-  "z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.6);overflow:hidden;";
+  "z-index:1000;box-shadow:0 8px 32px rgba(0,0,0,.6);overflow:hidden;" +
+  // editor.css sets user-select:none globally on <body> (a Chromebook/
+  // touchscreen drag fix — see that rule's comment), which every element
+  // in this modal would otherwise inherit. That's fine for most editor
+  // panels, but this popup's content — error messages, status text, the
+  // server badge — is exactly what someone would want to copy (e.g. to
+  // paste an error into a bug report), so re-enable selection just here.
+  "user-select:text;-webkit-user-select:text;";
 
 const HEADER_STYLE =
   "display:flex;align-items:center;justify-content:space-between;" +
@@ -168,11 +176,128 @@ function renderFormatPicker() {
     "Choose a format to build a standalone copy of your game — no editor required to run it. " +
     "More formats will show up here as they\u2019re added." +
     "</div>" +
-    FORMATS.map(renderCard).join("")
+    FORMATS.map((fmt) => {
+      if (fmt.id === "android") {
+        return renderCard(fmt, editorState.androidServerStatus) + renderAndroidServerPanel();
+      }
+      return renderCard(fmt, null);
+    }).join("")
   );
 }
 
-function renderCard(fmt) {
+function renderServerBadge(status) {
+  if (status === "checking") {
+    return '<span style="font-size:9px;color:#8a93a0;background:#262c3a;border-radius:3px;padding:1px 6px;">Checking server\u2026</span>';
+  }
+  if (status === "awake") {
+    return '<span style="font-size:9px;color:#7ee787;background:#16281f;border-radius:3px;padding:1px 6px;">\u25cf Server awake</span>';
+  }
+  if (status === "asleep") {
+    return '<span style="font-size:9px;color:#f0b849;background:#2e2515;border-radius:3px;padding:1px 6px;" ' +
+      'title="Free-tier hosts sleep after inactivity. Building will wake it, but the first request may take a while or time out — try again if it does.">' +
+      "\u25cf Server may be asleep</span>";
+  }
+  return "";
+}
+
+/**
+ * Android build servers are user-owned (see ServerConfig.js's top
+ * comment) rather than one baked into the editor, so this renders a
+ * small management panel directly under the Android card: a dropdown of
+ * the user's saved servers (if any), and an add/edit form. Kept as part
+ * of the Android FORMATS entry rather than a separate top-level section
+ * since it's meaningless for any other export target.
+ */
+function renderAndroidServerPanel() {
+  const servers = editorState.androidServers || [];
+  const activeId = editorState.androidActiveServerId;
+
+  const keygenLink =
+    '<a href="' + escAttr(ANDROID_KEYGEN_SITE_URL) + '" target="_blank" rel="noopener noreferrer" ' +
+    'style="color:#7dd3fc;text-decoration:none;">Get a build server + API key \u2192</a>';
+
+  let body = "";
+  if (servers.length === 0 && !editorState.androidServerFormOpen) {
+    body =
+      '<div style="font-size:10.5px;color:#8a93a0;margin-bottom:8px;line-height:1.5;">' +
+      "Android builds run on a server you connect \u2014 the editor itself can't compile APKs. " +
+      keygenLink + ", then add the server URL and API key it gives you below." +
+      "</div>" +
+      '<button type="button" data-action="android-server-add-open" style="' + SMALL_BTN_STYLE + '">+ Add build server</button>';
+  } else if (!editorState.androidServerFormOpen) {
+    body =
+      '<div style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;">' +
+      servers.map((s) => renderServerRow(s, s.id === activeId)).join("") +
+      "</div>" +
+      '<div style="display:flex;gap:10px;align-items:center;">' +
+      '<button type="button" data-action="android-server-add-open" style="' + SMALL_BTN_STYLE + '">+ Add another server</button>' +
+      '<span style="font-size:10px;">' + keygenLink + "</span>" +
+      "</div>";
+  } else {
+    body = renderAndroidServerForm();
+  }
+
+  return (
+    '<div style="margin:-4px 0 10px 30px;padding:10px 12px;background:#171b26;border:1px solid #2e3a50;border-radius:6px;">' +
+    body +
+    "</div>"
+  );
+}
+
+function renderServerRow(server, isActive) {
+  return (
+    '<div style="display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:4px;' +
+    (isActive ? "background:#22304a;border:1px solid #3a5a8a;" : "background:#1e2330;border:1px solid #2e3a50;") +
+    '">' +
+    '<button type="button" data-action="android-server-select" data-server-id="' + escAttr(server.id) + '" ' +
+    'style="flex:1;min-width:0;text-align:left;background:none;border:none;color:' + (isActive ? "#e2e8f2" : "#c8d0de") + ';' +
+    'font-size:11px;cursor:pointer;display:flex;align-items:center;gap:6px;padding:0;">' +
+    (isActive ? '<span style="color:#7ee787;flex-shrink:0;">\u25cf</span>' : '<span style="color:#4a5470;flex-shrink:0;">\u25cb</span>') +
+    '<span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escAttr(server.label) + "</span>" +
+    "</button>" +
+    '<button type="button" data-action="android-server-edit-open" data-server-id="' + escAttr(server.id) + '" ' +
+    'title="Edit" style="background:none;border:none;color:#6b7488;cursor:pointer;padding:2px 4px;flex-shrink:0;font-size:10px;">Edit</button>' +
+    '<button type="button" data-action="android-server-delete" data-server-id="' + escAttr(server.id) + '" ' +
+    'title="Remove" style="background:none;border:none;color:#6b7488;cursor:pointer;padding:2px;flex-shrink:0;">' + icon("trash", 12) + "</button>" +
+    "</div>"
+  );
+}
+
+function renderAndroidServerForm() {
+  const isEditing = !!editorState.androidServerFormEditingId;
+  const canSave = (editorState.androidServerFormUrl || "").trim() && (editorState.androidServerFormKey || "").trim();
+  return (
+    '<div style="font-size:10.5px;color:#8a93a0;margin-bottom:8px;line-height:1.5;">' +
+    (isEditing ? "Editing build server. " : "") +
+    "Don't have these yet? " +
+    '<a href="' + escAttr(ANDROID_KEYGEN_SITE_URL) + '" target="_blank" rel="noopener noreferrer" style="color:#7dd3fc;text-decoration:none;">' +
+    "Get a server + API key here \u2192</a>" +
+    "</div>" +
+    '<label style="display:block;font-size:10px;color:#8a93a0;margin-bottom:3px;">Label <span style="color:#5a6480;">(optional)</span></label>' +
+    '<input type="text" data-action="android-server-label-input" value="' + escAttr(editorState.androidServerFormLabel || "") + '" ' +
+    'placeholder="e.g. My build server" style="' + SMALL_INPUT_STYLE + 'margin-bottom:8px;" />' +
+    '<label style="display:block;font-size:10px;color:#8a93a0;margin-bottom:3px;">Server URL</label>' +
+    '<input type="text" data-action="android-server-url-input" value="' + escAttr(editorState.androidServerFormUrl || "") + '" ' +
+    'placeholder="https://your-build-server.example.com" style="' + SMALL_INPUT_STYLE + 'margin-bottom:8px;" />' +
+    '<label style="display:block;font-size:10px;color:#8a93a0;margin-bottom:3px;">API Key</label>' +
+    '<input type="text" data-action="android-server-key-input" value="' + escAttr(editorState.androidServerFormKey || "") + '" ' +
+    'placeholder="zk_live_\u2026" style="' + SMALL_INPUT_STYLE + 'margin-bottom:10px;" />' +
+    '<div style="display:flex;gap:8px;">' +
+    '<button type="button" data-action="android-server-form-save" ' + (canSave ? "" : "disabled ") +
+    'style="' + SMALL_BTN_STYLE + (canSave ? "" : "opacity:.5;cursor:default;") + '">' + (isEditing ? "Save changes" : "Add server") + "</button>" +
+    '<button type="button" data-action="android-server-form-cancel" style="background:none;border:none;color:#8a93a0;font-size:11px;cursor:pointer;">Cancel</button>' +
+    "</div>"
+  );
+}
+
+const SMALL_BTN_STYLE =
+  "background:#2e3a50;border:1px solid #3a4560;color:#c8d0de;border-radius:5px;padding:5px 10px;font-size:10.5px;cursor:pointer;";
+
+const SMALL_INPUT_STYLE =
+  "width:100%;box-sizing:border-box;background:#0f1219;border:1px solid #3a4560;border-radius:5px;" +
+  "color:#e2e8f2;font-size:11px;padding:6px 8px;font-family:inherit;";
+
+function renderCard(fmt, serverStatus) {
   if (fmt.comingSoon) {
     return (
       '<div style="' + CARD_DISABLED_STYLE + '" title="Coming soon">' +
@@ -191,9 +316,13 @@ function renderCard(fmt) {
     '<button type="button" data-action="start-export" data-format="' + fmt.id + '" style="' + CARD_STYLE + '">' +
     '<div style="flex-shrink:0;color:#7dd3fc;margin-top:1px;">' + icon(fmt.iconName, 18) + "</div>" +
     '<div style="flex:1;min-width:0;">' +
-    '<div style="font-size:12px;font-weight:600;color:#e2e8f2;">' + escAttr(fmt.label) + "</div>" +
+    '<div style="display:flex;align-items:center;gap:8px;">' +
+    '<span style="font-size:12px;font-weight:600;color:#e2e8f2;">' + escAttr(fmt.label) + "</span>" +
+    (serverStatus ? renderServerBadge(serverStatus) : "") +
+    "</div>" +
     '<div style="font-size:10.5px;color:#9aa4b2;margin-top:3px;line-height:1.4;">' + escAttr(fmt.description) + "</div>" +
     "</div>" +
+
     "</button>"
   );
 }
@@ -235,6 +364,9 @@ function renderResult(status) {
     (stats.bytesBefore ? "<br/>Assets shrunk by ~" + savedPct + "% (" + formatBytes(stats.bytesBefore) + " \u2192 " + formatBytes(stats.bytesAfter) + ")." : "") +
     "</div>" +
     skippedNote +
+    (isAndroid ? "" : (editorState.lastWebExport && getActiveAndroidServer()
+      ? '<button type="button" data-action="build-apk-from-last-export" style="margin-top:10px;background:#245b45;border:1px solid #3d8a67;color:#d7ffe9;border-radius:5px;padding:7px 12px;font-size:11px;font-weight:600;cursor:pointer;width:100%;">Build APK from this ' + (editorState.lastWebExport.format === "pwa" ? "PWA" : "HTML5") + ' export</button>'
+      : "")) +
     '<button type="button" data-action="export-window-reset" style="margin-top:14px;background:#2e3a50;border:1px solid #3a4560;color:#c8d0de;border-radius:5px;padding:6px 12px;font-size:11px;cursor:pointer;">Export another format</button>' +
     "</div>"
   );

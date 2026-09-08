@@ -21,7 +21,7 @@
 
 import { TRANSFORM } from "../../runtime/components/Transform.js";
 import { LIGHT, LightType } from "../../runtime/components/Light.js";
-import { MAX_FREEFORM_POINTS } from "../../runtime/systems/LightTextureShaderSource.js";
+import { DEFAULT_MAX_FREEFORM_POINTS } from "../../runtime/systems/LightTextureShaderSource.js";
 
 const HANDLE_RADIUS = 6; // px-ish world-space hit radius, scaled by worldPerPixel like LightGizmo's icon
 const HANDLE_COLOR = 0x5ad1ff; // distinct from LightGizmo's yellow so vertices read as a separate, editable layer
@@ -169,16 +169,23 @@ export class FreeformLightGizmo {
   /**
    * Inserts a new vertex at `worldX/worldY` right after `afterIndex`
    * (called on a single click landing on an edge line — see
-   * hitTestEdge). Capped at MAX_FREEFORM_POINTS (see
-   * LightTextureShaderSource.js) — the shader's uPolyPoints uniform
-   * array is a fixed-size flattened buffer per light, so any
-   * editor-side point beyond that cap would silently be ignored at
-   * render time, making the gizmo lie about the light's actual shape.
+   * hitTestEdge). Capped at DEFAULT_MAX_FREEFORM_POINTS (see
+   * LightTextureShaderSource.js) — the authoring-time ceiling for how
+   * many points a light can be drawn with in the editor. The RUNTIME
+   * cap the shader actually honors at render time can be lower than
+   * this on a lower-end device's GPU (see resolveCaps() in
+   * LightTextureShaderSource.js, which scales the shader's uniform
+   * arrays down to fit that device's real uniform budget) — any points
+   * beyond THAT cap are silently dropped per-light at render time
+   * regardless of what the editor allowed you to author, same as
+   * before this cap was made device-dependent. This editor-side cap
+   * intentionally stays at the fixed default rather than trying to
+   * predict a specific player's device from inside the editor.
    * @returns {boolean} whether a point was actually inserted
    */
   insertPoint(light, afterIndex, worldX, worldY, transform) {
     if (!light.points) return false;
-    if (light.points.length >= MAX_FREEFORM_POINTS) return false;
+    if (light.points.length >= DEFAULT_MAX_FREEFORM_POINTS) return false;
     light.points.splice(afterIndex + 1, 0, { x: worldX - transform.x, y: worldY - transform.y });
     return true;
   }

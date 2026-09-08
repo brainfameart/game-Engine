@@ -861,7 +861,7 @@ export function renderScriptEditor() {
     '<span id="se-status-text">' + (se.activeTab || "No script open") + '</span>' +
     '<span style="display:flex;align-items:center;gap:12px;">' +
     '<span style="color:#8a93a0;font-size:11px;">Auto-saved • Scripts run only in Play mode</span>' +
-    '<span style="background:#1177bb;color:#fff;font-size:10px;font-weight:600;padding:1px 7px;border-radius:3px;letter-spacing:0.3px;">ZenEngine Script</span>' +
+    '<span style="background:#1177bb;color:#fff;font-size:10px;font-weight:600;padding:1px 7px;border-radius:3px;letter-spacing:0.3px;">Vaelis Script</span>' +
     '</span>' +
     '</div>' +
     '</div>'

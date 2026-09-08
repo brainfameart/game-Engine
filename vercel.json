@@ -1,0 +1,16 @@
+{
+  "redirects": [
+    { "source": "/", "destination": "/index.html" },
+    { "source": "/editor", "destination": "/project/editor/index.html" },
+    { "source": "/project/editor", "destination": "/project/editor/index.html" },
+    { "source": "/play", "destination": "/project/player/play.html" },
+    { "source": "/player", "destination": "/project/player/play.html" },
+    { "source": "/project/player", "destination": "/project/player/play.html" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [{ "key": "Cache-Control", "value": "no-store" }]
+    }
+  ]
+}

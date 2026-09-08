@@ -22,16 +22,18 @@
  *   - Car:
  *       maxSpeed, acceleration (maps to CharacterController.
  *       carAcceleration — same tunable, Car's own name for it),
- *       brakeForce, turnSpeed, driftFactor, useDefaultInput
+ *       brakeForce, turnSpeed, driftFactor, useDefaultInput,
+ *       simulateDrive(throttle, steer) — contributes throttle/steer to the
+ *       same car input axes as WASD/Arrows when useDefaultInput is on; when
+ *       it is off, script/joystick input is the only source.
  *   - Follow:
  *       targetName, followSpeed, followDistance
  *   - Patrol:
  *       moveSpeed, acceleration (shared with the walk family),
- *       useDefaultInput, simulateMove(x, y) — auto-walks and turns at
- *       a wall or after patrolDistance px (whichever comes first)
- *       while useDefaultInput is on; turn it off to drive Patrol
- *       manually via simulateMove instead (y is ignored, Patrol has no
- *       vertical input concept). flipDirection() forces an immediate
+ *       useDefaultInput, simulateMove(x, y) — automatic patrol and scripted
+ *       movement can contribute together while useDefaultInput is on; turn it
+ *       off to make simulateMove the only movement source (y is ignored,
+ *       Patrol has no vertical input concept). flipDirection() forces an immediate
  *       turn on demand in EITHER mode. Also: patrolDistance,
  *       facingDirection (read-only), isOnWall, isOnCeiling, isOnSlope,
  *       groundAngle, isGrounded (read-only). No jump — Patrol never
@@ -191,6 +193,75 @@ function _simulateMove(entity, x, y) {
   }
 }
 
+/** Car-only: simulateDrive(throttle, steer) — sets one-shot car input
+ * consumed by ControllerSystem.js's _applyCar. throttle and steer are
+ * independent axes, matching the built-in keyboard controls: throttle
+ * controls acceleration/braking and steer controls steering. Fractional
+ * values are preserved for analog joysticks.
+ * When useDefaultInput is true, the scripted axes are combined with
+ * WASD/Arrow input; when false, they are the only car input source.
+ *
+ * throttle: -1..1 (1 = full accelerate, -1 = full brake/reverse, 0 =
+ * coast/natural decel — matching Up/Down or W/S). steer: -1..1 (1 =
+ * full right, -1 = full left, 0 = straight — matching Right/Left or
+ * A/D). Both clamped to -1..1. Unlike the keyboard (which only ever
+ * produces -1/0/1), fractional values are honored — e.g. a joystick
+ * or analog input can pass simulateDrive(0.4, -0.7) for partial
+ * throttle and steer.
+ *
+ * ONE-SHOT, NOT A TOGGLE: call it from onUpdate() every frame you
+ * want the car to keep moving/turning — calling it once from
+ * onStart() only drives the car for a single physics step, same as
+ * tapping a key for one frame instead of holding it down.
+ */
+function _simulateDrive(entity, throttle, steer) {
+  var c = _cc(entity);
+  if (!c) return;
+  c.requestThrottle = Math.max(-1, Math.min(1, Number(throttle) || 0));
+  if (steer !== undefined) {
+    c.requestSteer = Math.max(-1, Math.min(1, Number(steer) || 0));
+  }
+}
+
+/** Car-only joystick mode: x/y are the actual joystick direction. The
+ * controller derives magnitude and target heading from them, so a script
+ * can pass this.joystick.x/y directly and get directional arcade-car
+ * steering rather than treating the pair as a 2D movement vector.
+ */
+function _simulateDriveJoystick(entity, x, y) {
+  var c = _cc(entity);
+  if (!c) return;
+  c.requestJoystickX = Math.max(-1, Math.min(1, Number(x) || 0));
+  c.requestJoystickY = Math.max(-1, Math.min(1, Number(y) || 0));
+}
+
+/** Car-only "drive there yourself" autopilot: x/y are a world-space
+ * point, not throttle/steer or a joystick direction. ControllerSystem's
+ * _applyCar (via _resolveDriveTowardInput) works out the throttle and
+ * steering itself every frame — accelerating while pointed roughly the
+ * right way, steering toward the target, easing off / braking as it
+ * approaches, and reversing instead of turning around when the point is
+ * effectively behind the car — then feeds that into the SAME
+ * accelerate/brake/steer/drift math every other Car input source uses,
+ * so maxSpeed/acceleration/brakeForce/turnSpeed/driftFactor (Inspector
+ * or script) all shape it automatically. This drives the car like a
+ * chase-car NPC toward a point: no pathfinding/obstacle-avoidance — for
+ * that, add a Nav Agent 2D component and use this.navDriveToward(x, y)
+ * instead (see NavAPI-adjacent docs in ScriptAPI.js), which paths there
+ * step by step and calls this same steering model per waypoint.
+ *
+ * ONE-SHOT, NOT A TOGGLE: call it from onUpdate() every frame you want
+ * the car still heading toward (x, y) — calling it once from onStart()
+ * only steers the car for a single physics step, same as every other
+ * simulateDrive*() method on this API.
+ */
+function _simulateDriveToward(entity, x, y) {
+  var c = _cc(entity);
+  if (!c) return;
+  c.requestDriveTowardX = Number(x) || 0;
+  c.requestDriveTowardY = Number(y) || 0;
+}
+
 /** Patrol-only: flipDirection() — sets the one-shot requestFlip flag
  * ControllerSystem.js's _applyPatrol consumes on its very next update
  * and then clears back to false. Forces an immediate turn regardless
@@ -305,8 +376,13 @@ function _createCarAPI(entity) {
     set turnSpeed(v) { var c = _cc(entity); if (c) c.turnSpeed = v; },
     get driftFactor() { var c = _cc(entity); return c ? c.driftFactor : 0; },
     set driftFactor(v) { var c = _cc(entity); if (c) c.driftFactor = v; },
+    get driveTowardArriveDistance() { var c = _cc(entity); return c ? c.driveTowardArriveDistance : 0; },
+    set driveTowardArriveDistance(v) { var c = _cc(entity); if (c) c.driveTowardArriveDistance = v; },
     get useDefaultInput() { var c = _cc(entity); return c ? c.useDefaultInput : false; },
     set useDefaultInput(v) { var c = _cc(entity); if (c) c.useDefaultInput = !!v; },
+    simulateDrive: function (throttle, steer) { _simulateDrive(entity, throttle, steer); },
+    simulateDriveJoystick: function (x, y) { _simulateDriveJoystick(entity, x, y); },
+    simulateDriveToward: function (x, y) { _simulateDriveToward(entity, x, y); },
   };
 }
 
@@ -400,7 +476,7 @@ const ALL_KNOWN_MEMBERS = new Set([
   "moveSpeed", "acceleration", "airControl", "useGravity", "useDefaultInput", "simulateMove",
   "isGrounded", "isOnCeiling", "isOnWall", "isOnSlope", "groundAngle",
   "canJump", "jumpForce", "maxJumps", "simulateJump",
-  "maxSpeed", "brakeForce", "turnSpeed", "driftFactor",
+  "maxSpeed", "brakeForce", "turnSpeed", "driftFactor", "driveTowardArriveDistance", "simulateDrive", "simulateDriveJoystick", "simulateDriveToward",
   "targetName", "followSpeed", "followDistance",
   "patrolDistance", "facingDirection", "flipDirection",
 ]);
@@ -416,7 +492,7 @@ const ALL_KNOWN_MEMBERS = new Set([
 function _whyFor(member) {
   if (member === "canJump" || member === "jumpForce" || member === "maxJumps" ||
       member === "simulateJump") return JUMP_WHY;
-  if (member === "maxSpeed" || member === "brakeForce" || member === "turnSpeed" || member === "driftFactor") return CAR_ONLY_WHY;
+  if (member === "maxSpeed" || member === "brakeForce" || member === "turnSpeed" || member === "driftFactor" || member === "driveTowardArriveDistance" || member === "simulateDrive" || member === "simulateDriveJoystick" || member === "simulateDriveToward") return CAR_ONLY_WHY;
   if (member === "targetName" || member === "followSpeed" || member === "followDistance") return FOLLOW_ONLY_WHY;
   if (member === "patrolDistance" || member === "facingDirection" || member === "flipDirection") return PATROL_ONLY_WHY;
   if (member === "isGrounded" || member === "moveSpeed" || member === "airControl" || member === "useGravity" || member === "simulateMove" ||

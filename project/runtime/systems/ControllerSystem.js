@@ -156,6 +156,12 @@ export class ControllerSystem extends System {
      * so it lives here rather than on the CharacterController component
      * (RULES.txt section 4: components stay plain data). */
     this._patrolState = new Map();
+    /** @type {Map<string, boolean>} Compatibility flag: whether the current
+     * driveToward maneuver is committed to reverse. The richer maneuver
+     * state lives in _driveTowardManeuver below. */
+    this._driveTowardReverseState = new Map();
+    /** Runtime-only committed maneuver state for driveToward autopilot. */
+    this._driveTowardManeuver = new Map();
     /**
      * Set by runtime/index.js so Dynamic movement can read real Rapier
      * contact state (especially ground contact) before the next simulation step.
@@ -186,7 +192,7 @@ export class ControllerSystem extends System {
     // present from every map that isn't already empty for that id.
     const liveIds = new Set();
     for (const entity of entities) liveIds.add(entity.id);
-    if (this._verticalVelocity.size || this._jumpsUsed.size || this._jumpBuffer.size || this._jumpAirTime.size || this._jumpHasLaunched.size || this._carSpeed.size || this._patrolState.size) {
+    if (this._verticalVelocity.size || this._jumpsUsed.size || this._jumpBuffer.size || this._jumpAirTime.size || this._jumpHasLaunched.size || this._carSpeed.size || this._patrolState.size || this._driveTowardReverseState.size || this._driveTowardManeuver.size) {
       for (const id of this._verticalVelocity.keys()) if (!liveIds.has(id)) this._verticalVelocity.delete(id);
       for (const id of this._jumpsUsed.keys()) if (!liveIds.has(id)) this._jumpsUsed.delete(id);
       for (const id of this._jumpBuffer.keys()) if (!liveIds.has(id)) this._jumpBuffer.delete(id);
@@ -194,6 +200,8 @@ export class ControllerSystem extends System {
       for (const id of this._jumpHasLaunched.keys()) if (!liveIds.has(id)) this._jumpHasLaunched.delete(id);
       for (const id of this._carSpeed.keys()) if (!liveIds.has(id)) this._carSpeed.delete(id);
       for (const id of this._patrolState.keys()) if (!liveIds.has(id)) this._patrolState.delete(id);
+      for (const id of this._driveTowardReverseState.keys()) if (!liveIds.has(id)) this._driveTowardReverseState.delete(id);
+      for (const id of this._driveTowardManeuver.keys()) if (!liveIds.has(id)) this._driveTowardManeuver.delete(id);
     }
 
 
@@ -211,7 +219,12 @@ export class ControllerSystem extends System {
 
       const type = controller.controllerType;
       if (type === ControllerType.CAR) {
-        if (controller.useDefaultInput) this._applyCar(entity, controller, rigidbody, dt);
+        // ALL Car input is resolved in the late pass, after ScriptSystem.
+        // That lets the same frame combine live WASD/Arrow input with
+        // this.controller.simulateDrive(), while still letting
+        // useDefaultInput=false mean "script input only". Keeping one
+        // authoritative Car pass also prevents acceleration/braking from
+        // being applied twice in a single frame.
       } else if (type === ControllerType.FOLLOW) {
         this._applyFollow(entity, controller, rigidbody, dt, world);
       } else if (type === ControllerType.PATROL) {
@@ -238,6 +251,28 @@ export class ControllerSystem extends System {
     // event queued between frames would be added to _justPressed and then
     // immediately cleared before any controller could read it.
     this.input.tick();
+  }
+
+  /**
+   * LATE Car-input pass. Every Car goes through this single pass so
+   * ScriptSystem can contribute same-frame simulateDrive() values while
+   * default WASD/Arrow input remains available when useDefaultInput=true.
+   *
+   * This is intentionally Car-only: other controller types keep their
+   * existing early-update ordering so their scripts can continue reading
+   * the frame's fresh controller/contact state.
+   */
+  updateLateCarInput(world, dt) {
+    const entities = world.query(TRANSFORM, CHARACTER_CONTROLLER, RIGIDBODY_2D);
+    for (const entity of entities) {
+      const controller = entity.getComponent(CHARACTER_CONTROLLER);
+      if (controller.controllerType !== ControllerType.CAR) continue;
+
+      const rigidbody = entity.getComponent(RIGIDBODY_2D);
+      if (rigidbody.bodyType === BodyType.STATIC) continue;
+
+      this._applyCar(entity, controller, rigidbody, dt);
+    }
   }
 
   /**
@@ -289,16 +324,21 @@ export class ControllerSystem extends System {
       this._jumpBuffer.set(entityId, Math.max(0, existingBuffer - dt));
     }
 
-    // A script can request movement via this.controller.simulateMove(x, y)
-    // (ControllerAPI.js) — consumed here as a one-shot per-frame axis
-    // request, same lifecycle as requestJump above. When present it
-    // OVERRIDES the keyboard's own -1/0/1 read for that axis rather than
-    // adding to it, so simulateMove(-1, 0) reliably means "move left"
-    // regardless of what keys happen to be held at the same time.
+    // Default input and scripted input are two sources feeding the SAME
+    // movement axes. This is deliberately additive, not override-only:
+    // useDefaultInput=true keeps WASD/Arrows active while a script can add
+    // joystick/AI/cutscene input in the same frame. With useDefaultInput=false
+    // the keyboard contribution is zero, so the exact same API becomes
+    // script/joystick-only. Analog values are preserved and the final axis is
+    // clamped to [-1, 1].
     const keyMoveX = (right ? 1 : 0) - (left ? 1 : 0);
     const keyMoveY = (down ? 1 : 0) - (up ? 1 : 0);
-    const moveX = controller.requestMoveX !== null ? controller.requestMoveX : keyMoveX;
-    const moveY = controller.requestMoveY !== null ? controller.requestMoveY : keyMoveY;
+    const scriptMoveX = controller.requestMoveX !== null
+      ? Number(controller.requestMoveX) : 0;
+    const scriptMoveY = controller.requestMoveY !== null
+      ? Number(controller.requestMoveY) : 0;
+    const moveX = Math.max(-1, Math.min(1, keyMoveX + (Number.isFinite(scriptMoveX) ? scriptMoveX : 0)));
+    const moveY = Math.max(-1, Math.min(1, keyMoveY + (Number.isFinite(scriptMoveY) ? scriptMoveY : 0)));
     controller.requestMoveX = null;
     controller.requestMoveY = null;
 
@@ -431,15 +471,18 @@ export class ControllerSystem extends System {
       this._jumpBuffer.set(entityId, Math.max(0, existingBuffer - dt));
     }
 
-    // A script can request movement via this.controller.simulateMove(x, y)
-    // (ControllerAPI.js) — same one-shot lifecycle as requestJump, and
-    // same override-not-add semantics as the Dynamic path above: when
-    // set, it replaces the keyboard's -1/0/1 read for that axis rather
-    // than combining with it.
+    // Scripted and default input are combined exactly the same way as the
+    // Dynamic path: with useDefaultInput=true both sources contribute to the
+    // same axes; with it false only the scripted request remains. This keeps
+    // Character/Platformer/Top-Down behavior consistent across body types.
     const keyMoveX = (right ? 1 : 0) - (left ? 1 : 0);
     const keyMoveY = (down ? 1 : 0) - (up ? 1 : 0);
-    const moveX = controller.requestMoveX !== null ? controller.requestMoveX : keyMoveX;
-    const moveY = controller.requestMoveY !== null ? controller.requestMoveY : keyMoveY;
+    const scriptMoveX = controller.requestMoveX !== null
+      ? Number(controller.requestMoveX) : 0;
+    const scriptMoveY = controller.requestMoveY !== null
+      ? Number(controller.requestMoveY) : 0;
+    const moveX = Math.max(-1, Math.min(1, keyMoveX + (Number.isFinite(scriptMoveX) ? scriptMoveX : 0)));
+    const moveY = Math.max(-1, Math.min(1, keyMoveY + (Number.isFinite(scriptMoveY) ? scriptMoveY : 0)));
     controller.requestMoveX = null;
     controller.requestMoveY = null;
 
@@ -551,52 +594,357 @@ export class ControllerSystem extends System {
    * 0 deg = up, clockwise). Works on both Kinematic (velocityX/Y +
    * angularVelocity) and Dynamic (driveVelocityX/Y +
    * driveAngularVelocity) bodies.
+   *
+   * useDefaultInput = true (default): WASD/Arrows remain active and a
+   * script can add to them. simulateDrive(throttle, steer) uses the same
+   * two independent car axes as the built-in controls: throttle controls
+   * acceleration/braking and steer controls steering. Fractional values are
+   * supported for analog joysticks.
+   * useDefaultInput = false: only the scripted throttle/steer is used. Requests are
+   * one-shot and consumed after this update, so simulateDrive() should be
+   * called every frame the script wants to keep supplying input.
    */
+  /**
+   * Resolves a world-space target into one frame of Car throttle/steer.
+   *
+   * The autopilot is deliberately stateful: it uses a committed reverse
+   * maneuver with a brake-before-reverse transition, a locked steering side
+   * for centered-behind targets, and wide forward/reverse hysteresis. Once
+   * the car has backed around enough to put the target in its forward cone,
+   * it performs a smooth reverse-to-forward handoff instead of choosing a
+   * different gear from scratch every frame.
+   *
+   * The same resolver is used by simulateDriveToward() and navDriveToward(),
+   * so direct chase cars and NavAgent2D cars share identical vehicle handling.
+   */
+  _resolveDriveTowardInput(entity, controller, transform, targetX, targetY, currentSpeed, dt = 1 / 60) {
+    const dx = targetX - transform.x;
+    const dy = targetY - transform.y;
+    const distance = Math.hypot(dx, dy);
+    const arriveDist = Math.max(1, Number(controller.driveTowardArriveDistance) || 12);
+
+    if (distance <= arriveDist) {
+      this._driveTowardReverseState.delete(entity.id);
+      this._driveTowardManeuver.delete(entity.id);
+      return { throttle: 0, steer: 0 };
+    }
+
+    const rad = (transform.rotation * Math.PI) / 180;
+    const forwardX = Math.sin(rad);
+    const forwardY = -Math.cos(rad);
+    const dirX = dx / distance;
+    const dirY = dy / distance;
+    const angleTo = (fx, fy) => Math.atan2(fx * dirY - fy * dirX, fx * dirX + fy * dirY);
+    const forwardAngle = angleTo(forwardX, forwardY);
+    const reverseAngle = angleTo(-forwardX, -forwardY);
+    const absForward = Math.abs(forwardAngle);
+    const absSpeed = Math.abs(Number(currentSpeed) || 0);
+
+    let state = this._driveTowardManeuver.get(entity.id);
+    if (!state) {
+      state = { mode: 'forward', turnSign: 1, turnSignLocked: false, reverseTime: 0, targetX, targetY };
+      this._driveTowardManeuver.set(entity.id, state);
+    }
+
+    // Ordinary chase-target motion should not reset the maneuver. A large
+    // jump is treated as a new waypoint/goal so an old reverse decision is
+    // never carried into a completely different target.
+    const targetJump = Math.hypot(targetX - state.targetX, targetY - state.targetY);
+    const targetResetDistance = Math.max(28, arriveDist * 8, (Number(controller.maxSpeed) || 350) * 0.20);
+    if (targetJump > targetResetDistance) {
+      state.mode = 'forward';
+      state.turnSignLocked = false;
+      state.reverseTime = 0;
+    }
+    state.targetX = targetX;
+    state.targetY = targetY;
+
+    // Strong hysteresis gives the car real gear commitments instead of
+    // choosing a different gear every frame around the side of the car.
+    const REVERSE_ENTER_ANGLE = 120 * Math.PI / 180;
+    const REVERSE_EXIT_ANGLE = 55 * Math.PI / 180;
+    const REVERSE_MIN_TIME = 0.22;
+    const REVERSE_MIN_SPEED = Math.max(8, (Number(controller.maxSpeed) || 350) * 0.045);
+    const FORWARD_RECOVERY_ANGLE = 18 * Math.PI / 180;
+
+    // Exactly-behind targets have reverseAngle ~= 0. A straight reverse can
+    // never change heading, so choose a steering side once. IMPORTANT: once
+    // reverse begins, that side is locked until the maneuver finishes.
+    // Otherwise the target moving across the car's centerline could flip the
+    // reverse steering sign mid-maneuver and recreate left/right jitter.
+    if (!state.turnSignLocked && state.mode !== 'reverseAlign') {
+      if (Math.abs(reverseAngle) > 8 * Math.PI / 180) {
+        state.turnSign = reverseAngle > 0 ? 1 : -1;
+      } else if (!state.turnSign) {
+        state.turnSign = 1;
+      }
+    }
+
+    if (state.mode === 'forward' && absForward >= REVERSE_ENTER_ANGLE) {
+      state.mode = (Number(currentSpeed) || 0) > REVERSE_MIN_SPEED ? 'brakeForReverse' : 'reverseAlign';
+      state.turnSignLocked = true;
+      state.reverseTime = 0;
+    }
+
+    if (state.mode === 'brakeForReverse') {
+      if ((Number(currentSpeed) || 0) <= REVERSE_MIN_SPEED) {
+        state.mode = 'reverseAlign';
+        state.reverseTime = 0;
+      } else {
+        this._driveTowardReverseState.set(entity.id, false);
+        return { throttle: -1, steer: 0 };
+      }
+    }
+
+    if (state.mode === 'reverseAlign') {
+      state.reverseTime += Math.max(0, dt);
+      this._driveTowardReverseState.set(entity.id, true);
+
+      // Keep reversing until the car's FRONT is clearly pointed toward the
+      // target. The exit threshold is much smaller than the entry threshold,
+      // so small target/physics changes cannot bounce the car back into gear.
+      if (state.reverseTime >= REVERSE_MIN_TIME && absForward <= REVERSE_EXIT_ANGLE) {
+        state.mode = 'forwardRecover';
+        this._driveTowardReverseState.set(entity.id, false);
+      } else {
+        let steer = reverseAngle;
+        const absReverseTurn = Math.abs(steer);
+        if (absReverseTurn <= 8 * Math.PI / 180) {
+          steer = state.turnSign * (0.52 + Math.min(0.28, state.reverseTime * 0.6));
+        } else {
+          steer = Math.sign(steer) * Math.max(0.52, Math.min(1, absReverseTurn / (58 * Math.PI / 180)));
+        }
+        const throttleMagnitude = absForward < 95 * Math.PI / 180 ? 0.48 : 0.62;
+        return { throttle: -throttleMagnitude, steer };
+      }
+    }
+
+    if (state.mode === 'forwardRecover') {
+      this._driveTowardReverseState.set(entity.id, false);
+
+      // The car is now facing the target well enough to leave the reverse
+      // maneuver. Positive throttle first removes any remaining reverse speed.
+      // A tiny steering amount during that handoff keeps the nose from
+      // drifting away without causing a sudden full-lock turn at zero speed.
+      const currentLongitudinalSpeed = Number(currentSpeed) || 0;
+      if (currentLongitudinalSpeed < -REVERSE_MIN_SPEED) {
+        const handoffSteer = Math.max(-0.28, Math.min(0.28, forwardAngle / (55 * Math.PI / 180) * 0.28));
+        return { throttle: 1, steer: handoffSteer };
+      }
+
+      state.mode = 'forward';
+      state.turnSignLocked = false;
+    }
+
+    if (state.mode === 'forward') {
+      this._driveTowardReverseState.set(entity.id, false);
+
+      const STEER_FULL_ANGLE = 52 * Math.PI / 180;
+      const steerMagnitude = Math.max(0, Math.min(1, absForward / STEER_FULL_ANGLE));
+      const steer = Math.sign(forwardAngle) * steerMagnitude;
+
+      // Speed planning: stronger steering demand means less throttle. This
+      // keeps the car from overshooting waypoints and then looping back.
+      const turnSlowStart = 28 * Math.PI / 180;
+      const turnSlowEnd = 105 * Math.PI / 180;
+      let turnFactor = 1;
+      if (absForward > turnSlowStart) {
+        turnFactor = 1 - 0.58 * Math.min(1, (absForward - turnSlowStart) / (turnSlowEnd - turnSlowStart));
+      }
+
+      const brakingDistance = Math.max(
+        arriveDist * 2,
+        (absSpeed * absSpeed) / Math.max(1, 2 * (Number(controller.brakeForce) || 1))
+      );
+      const arrivalFactor = distance < brakingDistance
+        ? Math.max(0, Math.min(1, (distance - arriveDist) / Math.max(1, brakingDistance - arriveDist)))
+        : 1;
+
+      // A realistic car cannot make a tight turn at full road speed. Convert
+      // the heading error into a target speed, then BRAKE when the actual
+      // commanded speed is too high. This is the important piece that keeps
+      // a car from flying past a target in a large circle after a reverse
+      // maneuver. It also makes ordinary NavAgent waypoint corners cleaner.
+      const headingCos = Math.max(0, Math.cos(absForward));
+      const minCornerSpeed = Math.max(35, (Number(controller.maxSpeed) || 350) * 0.13);
+      const cruiseSpeed = Math.max(1, Number(controller.maxSpeed) || 350);
+      const turnSpeedLimit = Math.max(minCornerSpeed, cruiseSpeed * (0.16 + 0.84 * headingCos));
+      const desiredSpeed = Math.min(cruiseSpeed * arrivalFactor, turnSpeedLimit);
+
+      let throttle;
+      if (absSpeed > desiredSpeed + 8) {
+        // Brake rather than continue accelerating into a corner. The normal
+        // _applyCar speed integration will smoothly bleed velocity down.
+        throttle = -Math.min(1, Math.max(0.35, (absSpeed - desiredSpeed) / Math.max(30, controller.brakeForce * 0.45)));
+      } else if (desiredSpeed <= minCornerSpeed + 1 && absSpeed < minCornerSpeed) {
+        throttle = 0.32;
+      } else {
+        throttle = Math.max(0, Math.min(1, turnFactor * arrivalFactor));
+      }
+
+      return { throttle, steer };
+    }
+
+    state.mode = 'forward';
+    state.turnSignLocked = false;
+    this._driveTowardReverseState.set(entity.id, false);
+    return { throttle: 0, steer: 0 };
+  }
+
   _applyCar(entity, controller, rigidbody, dt) {
     const transform = entity.getComponent(TRANSFORM);
     if (!transform) return;
 
-    const accelerate = this.input.isDown("ArrowUp", "KeyW");
-    const brake = this.input.isDown("ArrowDown", "KeyS");
-    const steerLeft = this.input.isDown("ArrowLeft", "KeyA");
-    const steerRight = this.input.isDown("ArrowRight", "KeyD");
+    const useKeys = controller.useDefaultInput;
+    const keyAccelerate = useKeys && this.input.isDown("ArrowUp", "KeyW");
+    const keyBrake = useKeys && this.input.isDown("ArrowDown", "KeyS");
+    const keySteerLeft = useKeys && this.input.isDown("ArrowLeft", "KeyA");
+    const keySteerRight = useKeys && this.input.isDown("ArrowRight", "KeyD");
 
-    let speed = this._carSpeed.get(entity.id) || 0;
+    const keyThrottle = (keyAccelerate ? 1 : 0) - (keyBrake ? 1 : 0);
+    const keySteer = (keySteerRight ? 1 : 0) - (keySteerLeft ? 1 : 0);
 
-    if (accelerate) {
-      speed += controller.carAcceleration * dt;
-    } else if (brake) {
-      speed -= controller.brakeForce * dt;
-    } else {
-      // Natural deceleration when no throttle/brake input
-      const decay = 200 * dt;
-      if (speed > 0) speed = Math.max(0, speed - decay);
-      else if (speed < 0) speed = Math.min(0, speed + decay);
+    // Four independent input paths:
+    // 1) default keyboard = normal throttle + steering;
+    // 2) simulateDrive() = scripted throttle + steering;
+    // 3) simulateDriveJoystick() = a true directional joystick;
+    // 4) simulateDriveToward(x, y) / navDriveToward()'s internal call into
+    //    simulateDriveToward() = a world-space point this car resolves
+    //    into its own throttle/steer every frame (see
+    //    _resolveDriveTowardInput()'s doc comment). Any of the first three
+    //    takes over for this frame without changing the Inspector's
+    //    useDefaultInput setting.
+    const hasJoystick = controller.requestJoystickX !== null && controller.requestJoystickY !== null;
+    const joystickX = hasJoystick ? Number(controller.requestJoystickX) : 0;
+    const joystickY = hasJoystick ? Number(controller.requestJoystickY) : 0;
+
+    const hasScriptThrottle = controller.requestThrottle !== null;
+    const hasScriptSteer = controller.requestSteer !== null;
+    let scriptThrottle = hasScriptThrottle ? Number(controller.requestThrottle) : 0;
+    let scriptSteer = hasScriptSteer ? Number(controller.requestSteer) : 0;
+
+    const hasDriveToward = controller.requestDriveTowardX !== null && controller.requestDriveTowardY !== null;
+    if (hasDriveToward && !hasJoystick) {
+      const currentSpeedForAim = this._carSpeed.get(entity.id) || 0;
+      const aim = this._resolveDriveTowardInput(
+        entity, controller, transform,
+        Number(controller.requestDriveTowardX), Number(controller.requestDriveTowardY),
+        currentSpeedForAim
+      );
+      // Additive with any same-frame scripted throttle/steer (e.g. a
+      // script nudging the autopilot's steer), exactly like keyboard +
+      // simulateDrive() are additive above — clamped together below.
+      scriptThrottle += aim.throttle;
+      scriptSteer += aim.steer;
     }
-    // Clamp: full maxSpeed forward, half maxSpeed in reverse
-    speed = Math.max(-controller.maxSpeed * 0.5, Math.min(controller.maxSpeed, speed));
+    controller.requestDriveTowardX = null;
+    controller.requestDriveTowardY = null;
+
+    controller.requestThrottle = null;
+    controller.requestSteer = null;
+    controller.requestJoystickX = null;
+    controller.requestJoystickY = null;
+
+    const clamp = (v) => Math.max(-1, Math.min(1, Number(v) || 0));
+    let speed = this._carSpeed.get(entity.id) || 0;
+    let angularVelocity = 0;
+
+    if (hasJoystick) {
+      // TRUE JOYSTICK CAR MODE
+      // x/y are screen-space joystick coordinates: up is y=-1. The car
+      // accelerates according to how far the stick is pushed, but it turns
+      // toward the stick's direction instead of instantly snapping to it.
+      const x = clamp(joystickX);
+      const y = clamp(joystickY);
+      const magnitude = Math.min(1, Math.hypot(x, y));
+
+      if (magnitude > 0.0001) {
+        // Transform rotation convention is 0 degrees = up, clockwise.
+        // atan2(x, -y) therefore gives the desired car heading in radians.
+        const targetAngle = Math.atan2(x, -y);
+        let currentAngle = (transform.rotation * Math.PI) / 180;
+        let angleDiff = targetAngle - currentAngle;
+
+        // Normalize to the shortest turn in [-PI, PI].
+        while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+        while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+
+        // turnSpeed remains the existing car tuning in degrees/second.
+        const maxTurn = Math.max(0, Number(controller.turnSpeed) || 0) * dt * Math.PI / 180;
+        const turn = Math.max(-maxTurn, Math.min(maxTurn, angleDiff));
+        currentAngle += turn;
+        transform.rotation = currentAngle * 180 / Math.PI;
+        angularVelocity = turn / Math.max(dt, 1e-6);
+
+        // Stick magnitude is the gas pedal. No reverse is inferred from
+        // direction; pointing the stick behind the car makes the car turn
+        // around smoothly while continuing to accelerate.
+        speed += controller.carAcceleration * magnitude * dt;
+      } else {
+        // Released/centered stick: natural deceleration, no steering snap.
+        const decay = 200 * dt;
+        if (speed > 0) speed = Math.max(0, speed - decay);
+        else if (speed < 0) speed = Math.min(0, speed + decay);
+      }
+    } else {
+      // NORMAL CAR MODE: keyboard and simulateDrive() use independent
+      // throttle/steer axes. This is deliberately unchanged from the
+      // default car behavior so keyboard controls do not inherit joystick
+      // heading semantics.
+      const sThrottle = clamp(scriptThrottle);
+      const sSteer = clamp(scriptSteer);
+      const inputThrottle = clamp(sThrottle + (useKeys ? keyThrottle : 0));
+      const inputSteer = clamp(sSteer + (useKeys ? keySteer : 0));
+
+      if (inputThrottle > 0) {
+        speed += controller.carAcceleration * inputThrottle * dt;
+      } else if (inputThrottle < 0) {
+        speed += controller.brakeForce * inputThrottle * dt;
+      } else {
+        const decay = 200 * dt;
+        if (speed > 0) speed = Math.max(0, speed - decay);
+        else if (speed < 0) speed = Math.min(0, speed + decay);
+      }
+
+      if (inputSteer !== 0 && Math.abs(speed) > 0.001) {
+        const speedFactor = Math.min(1, Math.abs(speed) / Math.max(1, controller.maxSpeed));
+        const reverseSign = speed >= 0 ? 1 : -1;
+        const angStep = inputSteer * (Number(controller.turnSpeed) || 0) * speedFactor * reverseSign * dt;
+        transform.rotation += angStep;
+        angularVelocity = angStep * Math.PI / 180 / Math.max(dt, 1e-6);
+      }
+    }
+
+    speed = Math.max(
+      -controller.maxSpeed * 0.5,
+      Math.min(controller.maxSpeed, speed)
+    );
+
     this._carSpeed.set(entity.id, speed);
 
-    // Steering proportional to speed (can't turn when stopped)
-    const speedFactor = Math.abs(speed) / controller.maxSpeed;
-    const steer = (steerRight ? 1 : 0) - (steerLeft ? 1 : 0);
-    const angVel = steer * controller.turnSpeed * speedFactor;
-
-    // Forward direction from rotation (0 deg = up, clockwise)
     const rad = (transform.rotation * Math.PI) / 180;
     const forwardX = Math.sin(rad);
     const forwardY = -Math.cos(rad);
-    const vx = forwardX * speed;
-    const vy = forwardY * speed;
+    const rightX = Math.cos(rad);
+    const rightY = Math.sin(rad);
+
+    const oldVx = Number(rigidbody.velocityX) || 0;
+    const oldVy = Number(rigidbody.velocityY) || 0;
+    const oldLateral = oldVx * rightX + oldVy * rightY;
+    const drift = Math.max(0, Math.min(1, Number(controller.driftFactor) || 0));
+    const lateral = oldLateral * drift;
+
+    const vx = forwardX * speed + rightX * lateral;
+    const vy = forwardY * speed + rightY * lateral;
 
     if (rigidbody.bodyType === BodyType.DYNAMIC) {
       rigidbody.driveVelocityX = vx;
       rigidbody.driveVelocityY = vy;
-      rigidbody.driveAngularVelocity = angVel;
+      rigidbody.driveAngularVelocity = angularVelocity;
     } else {
       rigidbody.velocityX = vx;
       rigidbody.velocityY = vy;
-      rigidbody.angularVelocity = angVel;
+      rigidbody.angularVelocity = angularVelocity;
     }
   }
 
@@ -724,28 +1072,25 @@ export class ControllerSystem extends System {
     }
     controller.requestFlip = false;
 
-    // A script can request movement via this.controller.simulateMove(x, y)
-    // (ControllerAPI.js) — same one-shot per-frame axis request the walk
-    // family already uses in _applyDynamic/_applyKinematic. Only read
-    // when useDefaultInput is OFF, so a script driving Patrol manually
-    // never fights the built-in auto-walk/auto-turn logic below; when ON,
-    // any stray request is still consumed and discarded so it can't leak
-    // into a later frame where useDefaultInput gets turned off.
+    // Scripted movement is an additional input source when default input is
+    // enabled, just like Character/Platformer/Top-Down and Car. With
+    // useDefaultInput=false it becomes the only source. This means a Patrol
+    // can keep its automatic back-and-forth behavior while a script nudges it
+    // in the same frame, or a script can take complete control.
     const useAutoWalk = controller.useDefaultInput;
-    const requestedX = controller.requestMoveX;
+    const scriptMoveX = controller.requestMoveX !== null
+      ? Number(controller.requestMoveX) : 0;
     controller.requestMoveX = null;
-    controller.requestMoveY = null; // Patrol has no vertical input concept — discard same as X
+    controller.requestMoveY = null; // Patrol has no vertical input concept
 
     if (!useAutoWalk) {
-      // Manual mode: no auto-walk, no auto-turn (the wall check below
-      // is for the built-in behavior only). Facing direction still
-      // tracks the requested axis so facingDirection and any later
-      // re-enable of auto-walk start from something sensible, but
-      // nothing here can trigger a turn on its own.
+      // Manual mode: no auto-walk/auto-turn. Script movement is the only
+      // horizontal source. Facing direction follows the requested axis.
+      const requestedX = Number.isFinite(scriptMoveX) ? scriptMoveX : 0;
       if (requestedX > 0) state.dir = 1;
       else if (requestedX < 0) state.dir = -1;
 
-      const targetX = (requestedX || 0) * controller.moveSpeed;
+      const targetX = Math.max(-1, Math.min(1, requestedX)) * controller.moveSpeed;
       const lerpT = Math.min(1, controller.acceleration * (grounded ? 1 : controller.airControl) * dt);
 
       if (isDynamic) {
@@ -787,7 +1132,12 @@ export class ControllerSystem extends System {
       state.turnLockout = ControllerSystem.PATROL_TURN_LOCKOUT;
     }
 
-    const targetX = state.dir * controller.moveSpeed;
+    // Automatic patrol direction and scripted input are combined on the same
+    // normalized axis. A script can therefore slow, stop, or reverse the
+    // automatic patrol without disabling default input.
+    const scriptContribution = Number.isFinite(scriptMoveX) ? scriptMoveX : 0;
+    const combinedX = Math.max(-1, Math.min(1, state.dir + scriptContribution));
+    const targetX = combinedX * controller.moveSpeed;
     const lerpT = Math.min(1, controller.acceleration * (grounded ? 1 : controller.airControl) * dt);
 
     if (isDynamic) {
@@ -827,5 +1177,7 @@ export class ControllerSystem extends System {
     this._jumpsUsed.clear();
     this._carSpeed.clear();
     this._patrolState.clear();
+    this._driveTowardReverseState.clear();
+    this._driveTowardManeuver.clear();
   }
 }

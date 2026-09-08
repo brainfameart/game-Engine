@@ -319,7 +319,7 @@ const CONTROLLER_API_WALK_COMMON = [
   { label: "airControl", detail: "0-1 multiplier on acceleration while airborne", insert: "airControl = ", kind: "Property" },
   { label: "useGravity", detail: "Whether gravity applies (always true for Platformer, always false for Top-Down)", insert: "useGravity = ", kind: "Property" },
   { label: "useDefaultInput", detail: "Whether WASD/Arrows are wired automatically — turn off to drive movement entirely from script", insert: "useDefaultInput = ", kind: "Property" },
-  { label: "simulateMove(x, y)", detail: "Move left/right (and up/down for Top-Down) from script — x/y are -1 to 1", insert: "simulateMove(${1:x}, ${2:y})", kind: "Method", snippet: true },
+  { label: "simulateMove(x, y)", detail: "Add movement from script/joystick; with useDefaultInput on it combines with WASD/Arrows — x/y are -1 to 1", insert: "simulateMove(${1:x}, ${2:y})", kind: "Method", snippet: true },
   { label: "isGrounded", detail: "True when touching the ground (read-only)", insert: "isGrounded", kind: "Property" },
   { label: "isOnCeiling", detail: "True when touching a ceiling surface above (read-only)", insert: "isOnCeiling", kind: "Property" },
   { label: "isOnWall", detail: "True when touching a wall surface steeper than wallAngleLimit (read-only)", insert: "isOnWall", kind: "Property" },
@@ -342,7 +342,11 @@ const CONTROLLER_API_CAR = [
   { label: "brakeForce", detail: "How fast it brakes / goes into reverse (px/s²)", insert: "brakeForce = ", kind: "Property" },
   { label: "turnSpeed", detail: "Max turn rate in deg/s at full speed (scales down at lower speeds)", insert: "turnSpeed = ", kind: "Property" },
   { label: "driftFactor", detail: "0-1: how much lateral velocity is retained (higher = more slide)", insert: "driftFactor = ", kind: "Property" },
-  { label: "useDefaultInput", detail: "Whether WASD/Arrows (throttle/brake/steer) are wired automatically", insert: "useDefaultInput = ", kind: "Property" },
+  { label: "driveTowardArriveDistance", detail: "Px from the target that counts as arrived for simulateDriveToward()/this.navDriveToward() — coasts to a stop inside this radius", insert: "driveTowardArriveDistance = ", kind: "Property" },
+  { label: "useDefaultInput", detail: "Whether WASD/Arrows (throttle/brake/steer) are wired automatically — turn off to drive it from script via simulateDrive", insert: "useDefaultInput = ", kind: "Property" },
+  { label: "simulateDrive(throttle, steer)", detail: "Add throttle/steer from script or joystick; with useDefaultInput on it combines with WASD/Arrows — values are -1 to 1", insert: "simulateDrive(${1:throttle}, ${2:steer})", kind: "Method", snippet: true },
+  { label: "simulateDriveJoystick(x, y)", detail: "Car directional joystick: joystick angle controls smooth steering toward the stick direction; magnitude controls acceleration. x/y are -1 to 1", insert: "simulateDriveJoystick(${1:x}, ${2:y})", kind: "Method", snippet: true },
+  { label: "simulateDriveToward(x, y)", detail: "Drive/drift toward a world point like a chase-car NPC: accelerates, steers, brakes on approach, and reverses instead of turning around when the point is behind the car. Uses this Car's maxSpeed/acceleration/brakeForce/turnSpeed/driftFactor.", insert: "simulateDriveToward(${1:x}, ${2:y})", kind: "Method", snippet: true },
 ];
 const CONTROLLER_API_FOLLOW = [
   { label: "controllerType", detail: "'Follow' (read-only)", insert: "controllerType", kind: "Property" },
@@ -356,7 +360,7 @@ const CONTROLLER_API_PATROL = [
   { label: "acceleration", detail: "How fast velocity approaches target speed (higher = snappier)", insert: "acceleration = ", kind: "Property" },
   { label: "patrolDistance", detail: "Px to walk before auto-turning, if nothing else (a wall) turns it first", insert: "patrolDistance = ", kind: "Property" },
   { label: "useDefaultInput", detail: "Whether Patrol auto-walks/auto-turns on its own — turn off to drive it entirely from script via simulateMove", insert: "useDefaultInput = ", kind: "Property" },
-  { label: "simulateMove(x, y)", detail: "Drive Patrol manually from script (only takes effect while useDefaultInput is off) — x is -1 to 1, y is ignored", insert: "simulateMove(${1:x}, ${2:y})", kind: "Method", snippet: true },
+  { label: "simulateMove(x, y)", detail: "Add scripted movement to Patrol; with useDefaultInput on it combines with auto-walk — x is -1 to 1, y is ignored", insert: "simulateMove(${1:x}, ${2:y})", kind: "Method", snippet: true },
   { label: "flipDirection()", detail: "Force an immediate turn, works whether useDefaultInput is on or off — e.g. turn around the moment the player is spotted", insert: "flipDirection()", kind: "Method", snippet: true },
   { label: "facingDirection", detail: "-1 (left) or 1 (right) — current walk direction (read-only)", insert: "facingDirection", kind: "Property" },
   { label: "isGrounded", detail: "True when touching the ground (read-only)", insert: "isGrounded", kind: "Property" },
@@ -496,6 +500,16 @@ const NAV_AGENT_API = [
   { label: "avoidancePriority", detail: "0-100. Higher-priority agents yield less to lower-priority ones when local avoidance disagrees about who moves aside.", insert: "avoidancePriority", kind: "Property" },
   { label: "collabEnabled", detail: "When true, this agent joins 'smart NPC' group-surround behavior: if another collabEnabled agent is heading toward the same target, this.navMoveToward() redirects each of them to its own slot on a ring around it instead of both pathing to the identical point.", insert: "collabEnabled", kind: "Property" },
   { label: "collabGroupRadius", detail: "px. Two collabEnabled agents whose targets are within the smaller of their two collabGroupRadius values count as converging on 'the same thing' and get separate surround slots.", insert: "collabGroupRadius", kind: "Property" },
+  { label: "vehicleLookahead", detail: "Car + Nav: path look-ahead distance; increases with speed to reduce waypoint hunting.", insert: "vehicleLookahead", kind: "Property" },
+  { label: "vehicleCornerLookahead", detail: "Car + Nav: how far ahead to preview corners for early braking.", insert: "vehicleCornerLookahead", kind: "Property" },
+  { label: "vehicleObstacleLookahead", detail: "Car + Nav: short-range physics scan distance for late/moving obstacles.", insert: "vehicleObstacleLookahead", kind: "Property" },
+  { label: "vehicleObstacleWidth", detail: "Car + Nav: lateral spacing of the local obstacle scan rays.", insert: "vehicleObstacleWidth", kind: "Property" },
+  { label: "vehicleSteerSmoothing", detail: "Car + Nav: steering response smoothing; higher is quicker, lower is softer.", insert: "vehicleSteerSmoothing", kind: "Property" },
+  { label: "vehicleSpeedSmoothing", detail: "Car + Nav: speed-command smoothing for gradual acceleration/braking transitions.", insert: "vehicleSpeedSmoothing", kind: "Property" },
+  { label: "vehicleCornerSlowdown", detail: "Car + Nav: minimum fraction of cruise speed retained through a hard corner.", insert: "vehicleCornerSlowdown", kind: "Property" },
+  { label: "vehicleObstacleBrake", detail: "Car + Nav: local obstacle braking strength.", insert: "vehicleObstacleBrake", kind: "Property" },
+  { label: "vehicleRecoveryTime", detail: "Car + Nav: low-progress time before stuck recovery begins.", insert: "vehicleRecoveryTime", kind: "Property" },
+  { label: "vehicleRecoveryReverseTime", detail: "Car + Nav: duration of the reverse escape maneuver when stuck.", insert: "vehicleRecoveryReverseTime", kind: "Property" },
   { label: "area", detail: "Bitmask of which Nav World 2D areas (Ground, Water, ...) this agent is ALLOWED to path through at all — same model as Unity's NavMeshAgent.areaMask. A route never crosses a disallowed area. See Edit > Nav Areas… for slot names, and the Nav World 2D's Area Costs for a separate soft per-area preference. Toggle one bit with this.navAgent.area |= (1 << index) / &= ~(1 << index).", insert: "area", kind: "Property" },
   { label: "currentPath", detail: "{x,y}[] | null — the path this.navMoveToward() is currently following (read-only; call this.navMoveToward(x, y) again to change the destination)", insert: "currentPath", kind: "Property" },
   { label: "currentPathIndex", detail: "Index into currentPath this agent is currently walking toward (read-only)", insert: "currentPathIndex", kind: "Property" },
@@ -595,6 +609,20 @@ const THIS_SHORTCUTS_COLLIDER = [
 // gating principle as THIS_SHORTCUTS_COLLIDER just above.
 const THIS_SHORTCUTS_NAV_AGENT = [
   { label: "navMoveToward(targetX, targetY, speed, opts)", detail: "One-line NavWorld2D-following movement. Requires a NavAgent2D component. opts = { repathInterval, arriveDist, finalArriveDist, targetChangeDistance, debug }.", insert: "navMoveToward(${1:targetX}, ${2:targetY}, ${3:120})", kind: "Method", snippet: true },
+];
+
+// Only offered when the current entity (or context entity(ies)) has BOTH
+// a Car-type CharacterController AND a NavAgent2D — this is the "chase
+// car NPC" combo: the Nav Agent supplies pathfinding + obstacle
+// avoidance, the Car controller supplies actual driving/drift handling.
+// Neither component alone is enough (see EntityContext.navDriveToward's
+// own doc comment in ScriptAPI.js, which no-ops without both), so this
+// is gated more narrowly than THIS_SHORTCUTS_NAV_AGENT above — checked
+// via _hasCarNavCombo() at the call site rather than a single `keys.has`
+// test, since it depends on the CharacterController's controllerType,
+// not just its presence.
+const THIS_SHORTCUTS_CAR_NAV_AGENT = [
+  { label: "navDriveToward(targetX, targetY, speed, opts)", detail: "Drive/drift toward a NavWorld2D-pathed point like a chase-car NPC — paths and avoids obstacles like a Nav Agent, but accelerates/brakes/steers/drifts using this entity's Car controller settings (maxSpeed, acceleration, brakeForce, turnSpeed, driftFactor). Requires a Car-type Movement Type AND a NavAgent2D. opts = { repathInterval, arriveDist, finalArriveDist, targetChangeDistance, debug }.", insert: "navDriveToward(${1:targetX}, ${2:targetY}, ${3:220})", kind: "Method", snippet: true },
 ];
 
 const GLOBAL_APIS = [
@@ -1309,7 +1337,7 @@ function _computeDiagnostics(monaco, model) {
         startColumn: startPos.column,
         endLineNumber: endPos.lineNumber,
         endColumn: endPos.column,
-        source: "ZenEngine",
+        source: "Vaelis",
       });
     }
   }
@@ -1399,7 +1427,7 @@ function _computeUnknownWarnings(monaco, model) {
         startColumn: startPos.column,
         endLineNumber: endPos.lineNumber,
         endColumn: endPos.column,
-        source: "ZenEngine",
+        source: "Vaelis",
       });
     }
   }
@@ -1518,6 +1546,7 @@ export function _detectNavOptionsContext(textUntil) {
   const patterns = [
     { name: "findPath", rx: /\bnav\s*\.\s*findPath\s*\(/g },
     { name: "navMoveToward", rx: /\bthis\s*\.\s*navMoveToward\s*\(/g },
+    { name: "navDriveToward", rx: /\bthis\s*\.\s*navDriveToward\s*\(/g },
   ];
 
   let best = null;
@@ -2097,6 +2126,32 @@ function _pushShortcutCompletions(monaco, range, suggestions, keys, entities) {
       suggestions.push(_makeCompletion(monaco, item, range));
     }
   }
+  if (keys && keys.has(NAV_AGENT_2D) && keys.has(CHARACTER_CONTROLLER) && _hasCarController(entities)) {
+    for (const item of THIS_SHORTCUTS_CAR_NAV_AGENT) {
+      suggestions.push(_makeCompletion(monaco, item, range));
+    }
+  }
+}
+
+/**
+ * True if ANY entity in `entities` has a Car-type CharacterController.
+ * Used alongside the plain component-presence checks above to gate
+ * this.navDriveToward() — unlike THIS_SHORTCUTS_NAV_AGENT/COLLIDER,
+ * "has a CharacterController" alone isn't enough here, since a
+ * Follow/Patrol/walk-family controller paired with a NavAgent2D still
+ * can't drive like a car. Same "union of every owning object" spirit as
+ * _controllerApiForEntities — offered if AT LEAST ONE selected/context
+ * entity is actually a Car, matching how a script shared by several
+ * objects shows the union of what's valid for any of them.
+ */
+function _hasCarController(entities) {
+  if (!entities) return false;
+  for (const e of entities) {
+    if (!e.hasComponent(CHARACTER_CONTROLLER)) continue;
+    const cc = e.getComponent(CHARACTER_CONTROLLER);
+    if (cc && cc.controllerType === ControllerType.CAR) return true;
+  }
+  return false;
 }
 
 // ─── Provider registration ────────────────────────────────────────────────────

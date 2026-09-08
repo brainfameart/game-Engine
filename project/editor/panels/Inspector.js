@@ -982,6 +982,15 @@ export function renderInspector() {
   if (navAgent) {
     const namedNavAreas = getNamedNavAreas();
     const isPreviewing = editorState.navAgentPreviewEntityId === entity.id;
+    // Cross-entity lookup: NavAgent2D and NavWorld2D live on different
+    // entities (one shared NavWorld2D, many NavAgent2D — see that
+    // component's header), so unlike navWorld above (this entity's OWN
+    // component), the world whose default costs we show placeholders
+    // for has to be found by scanning the scene, same pattern
+    // tilesetEntities above uses for Tilemap's cross-entity picker.
+    const sceneNavWorldEntity = world ? world.getAllEntities().find((e) => e.hasComponent(NAV_WORLD_2D)) : null;
+    const sceneNavWorld = sceneNavWorldEntity ? sceneNavWorldEntity.getComponent(NAV_WORLD_2D) : null;
+    const agentCosts = navAgent.areaCosts; // null, or a 16-length array with per-slot overrides/nulls
 
     body += section(
       editorState.sectionsOpen,
@@ -1058,7 +1067,37 @@ export function renderInspector() {
             "</div>"
         ) +
         '<div class="static-body-note" style="padding:0 4px 6px;color:#8a93a0;font-size:11px;">' +
-        "Which areas this agent may path through at all — unchecking an area makes it impassable for this agent, same as Unity's NavMeshAgent.areaMask. To make an area merely SLOWER to cross instead of forbidden (e.g. mud), set its cost on the Nav World 2D — see Edit \u2192 Nav Areas\u2026 for naming, and the Nav World 2D's Area Costs for per-area cost." +
+        "Which areas this agent may path through at all — unchecking an area makes it impassable for this agent, same as Unity's NavMeshAgent.areaMask. To make an area merely SLOWER to cross instead of forbidden (e.g. mud), use this agent's own Area Costs below, or the Nav World 2D's Area Costs to affect every agent — see Edit \u2192 Nav Areas\u2026 for naming." +
+        "</div>" +
+        row(
+          "Area Costs",
+          '<div style="display:flex;flex-direction:column;gap:3px;width:100%;">' +
+            (namedNavAreas.length
+              ? namedNavAreas
+                  .map(({ index, name }) => {
+                    const overrideValue = Array.isArray(agentCosts) ? agentCosts[index] : null;
+                    const hasOverride = typeof overrideValue === "number" && overrideValue > 0;
+                    const worldDefault = sceneNavWorld ? sceneNavWorld.areaCosts[index] : 1;
+                    return (
+                      '<div style="display:flex;align-items:center;gap:6px;">' +
+                      '<input type="checkbox" data-field="NavAgent2D.areaCostOverrideEnabled" data-area-index="' + index + '"' +
+                      (hasOverride ? " checked" : "") +
+                      ' style="accent-color:#2C5D87;margin:0;" title="Override this area\u2019s cost for this agent only"/>' +
+                      '<span style="flex:1;font-size:11px;color:#c8d0de;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + name + '</span>' +
+                      '<input type="number" step="0.1" min="0.01" value="' + (hasOverride ? overrideValue : worldDefault) +
+                      '" data-field="NavAgent2D.areaCost" data-area-index="' + index +
+                      '"' + (hasOverride ? "" : " disabled") +
+                      ' style="width:56px;background:#1a2030;color:#c8d0de;border:1px solid #2e3a50;border-radius:4px;padding:2px 4px;font-size:11px;' +
+                      (hasOverride ? "" : "opacity:0.5;") + '"/>' +
+                      "</div>"
+                    );
+                  })
+                  .join("")
+              : '<span style="color:#8a93a0;font-size:11px;">No named areas — name slots via Edit \u2192 Nav Areas\u2026</span>') +
+            "</div>"
+        ) +
+        '<div class="static-body-note" style="padding:0 4px 6px;color:#8a93a0;font-size:11px;">' +
+        "Check a box to give THIS agent its own cost for that area instead of the Nav World 2D's shared default (shown grayed out when unchecked). Useful when different agents should treat the same area differently — e.g. a heavy truck avoids Mud while a light scout ignores it." +
         "</div>" +
         '<button class="animwin-btn' + (isPreviewing ? " active" : "") + '" data-action="toggle-nav-agent-preview" data-entity="' + entity.id + '" style="width:100%;margin-top:6px;">' +
         icon("route", 12) +
@@ -1411,7 +1450,16 @@ export function renderInspector() {
         row("Acceleration", numInput("", controller.carAcceleration, "CharacterController.carAcceleration")) +
         row("Brake Force", numInput("", controller.brakeForce, "CharacterController.brakeForce")) +
         row("Turn Speed", numInput("", controller.turnSpeed, "CharacterController.turnSpeed")) +
-        row("Drift Factor", numInput("", controller.driftFactor, "CharacterController.driftFactor"));
+        row("Drift Factor", numInput("", controller.driftFactor, "CharacterController.driftFactor")) +
+        row("Drive Toward Arrive Dist.", numInput("", controller.driveTowardArriveDistance, "CharacterController.driveTowardArriveDistance")) +
+        '<div class="static-body-note" style="padding:6px 4px;color:#8a93a0;font-size:11px;">' +
+        (controller.useDefaultInput
+          ? "Use Default Input is ON: throttle/brake/steer read WASD/Arrows automatically."
+          : "Use Default Input is OFF: WASD/Arrows are ignored. Drive it from a script instead with this.controller.simulateDrive(throttle, steer) every frame you want it moving — throttle/steer are -1..1, so any key you pick, a Joystick component (this.joystick.x/.y), or another input source works.") +
+        "</div>" +
+        '<div class="static-body-note" style="padding:6px 4px;color:#8a93a0;font-size:11px;">' +
+        "Chase-car autopilot: this.controller.simulateDriveToward(x, y) drives/drifts straight toward a point using the settings above. Add a Nav Agent 2D component to also get this.navDriveToward(x, y) — same driving feel, but pathing around obstacles." +
+        "</div>";
     } else if (isFollow) {
       typeSpecificHtml =
         row("Target Name", '<input type="text" data-field="CharacterController.targetName" value="' + (controller.targetName || "") + '" style="width:100%;background:#2a2a2a;border:1px solid #3a3a3a;color:#dcdcdc;padding:3px 6px;border-radius:3px;font-size:11px;"/>') +

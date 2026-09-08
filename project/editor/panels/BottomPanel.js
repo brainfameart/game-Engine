@@ -109,7 +109,7 @@ export function renderBottom() {
         ? scripts
             .map(
               (sname) =>
-                '<div class="asset-item" data-action="open-script-from-folder" data-script="' + sname + '" title="Open in script editor"><div class="asset-thumb">' + icon("code", 22) +
+                '<div class="asset-item" data-action="open-script-from-folder" data-script="' + sname + '" title="Open in script editor"><div class="asset-thumb asset-thumb-script">' +
                 assetDeleteBtn("delete-script-asset", "script", sname, sname) +
                 '<div class="asset-ext">JS</div></div>' +
                 renameableAssetLabel("script", sname, sname) +
@@ -119,16 +119,18 @@ export function renderBottom() {
         : '<div class="asset-empty-hint">No scripts yet. Attach a Script component to an object (in the Inspector) to create one.</div>';
       pathToolbarHtml = "";
     } else if (folder === "prefabs") {
-      // Prefabs have no bitmap thumbnail (a prefab is just component
-      // data, see PrefabRegistry.js — not necessarily even backed by a
-      // sprite at all, e.g. a Light or Collider2D-only prefab), so
-      // every card just shows the same "box" icon sprite assets use for
-      // their own IMG/AUD/JS type badge, distinguishing itself only via
-      // the "PFB" badge instead. Created via the Inspector's "Make
-      // Prefab" button (see Inspector.js's obj-header-icon-btn) — there
-      // is no "New Prefab" button here the way Sprites/Audio/Scripts
-      // have an import/new action, since a prefab only ever starts life
-      // FROM an existing scene object, never from nothing.
+      // Prefabs are just component data (see PrefabRegistry.js), not
+      // necessarily backed by a sprite at all (e.g. a Light or
+      // Collider2D-only prefab) — those fall back to the same "box"
+      // icon sprite assets' own IMG/AUD/JS badge convention uses,
+      // distinguished only via the "PFB" badge. Ones created from an
+      // entity that HAD a resolvable sprite instead show that sprite's
+      // image as a real thumbnail (see p.thumbnail below). Created via
+      // the Inspector's "Make Prefab" button (see Inspector.js's
+      // obj-header-icon-btn) — there is no "New Prefab" button here the
+      // way Sprites/Audio/Scripts have an import/new action, since a
+      // prefab only ever starts life FROM an existing scene object,
+      // never from nothing.
       const prefabs = getAllPrefabs();
       gridHtml = prefabs.length
         ? prefabs
@@ -137,7 +139,17 @@ export function renderBottom() {
                 '<div class="asset-item" draggable="true" data-action="drag-prefab-asset" data-prefab-id="' +
                 p.id +
                 '" title="Drag into the scene view"><div class="asset-thumb">' +
-                icon("box", 22) +
+                // Prefabs created from an entity with a resolvable sprite
+                // get a real image thumbnail (same <img>-over-dataUrl
+                // pattern the Sprites folder above uses); everything else
+                // (Lights, Collider2D-only entities, or a sprite whose
+                // asset was since deleted) falls back to the generic
+                // "box" icon exactly as before. See PrefabRegistry.js's
+                // createPrefabFromEntity/resolveThumbnail for where
+                // p.thumbnail comes from.
+                (p.thumbnail
+                  ? '<img src="' + p.thumbnail + '" alt="' + p.name + '" style="width:100%;height:100%;object-fit:contain;" draggable="false" />'
+                  : icon("box", 22)) +
                 assetDeleteBtn("delete-prefab-asset", "prefab-id", p.id, p.name) +
                 '<div class="asset-ext">PFB</div></div>' +
                 renameableAssetLabel("prefab", p.id, p.name) +

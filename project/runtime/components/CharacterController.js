@@ -59,8 +59,13 @@ export class CharacterController {
     // controller; Platformer always uses gravity; Top-Down never does)
     useGravity = true,
 
-    // Input. For the walk family (Character/Platformer/Top-Down) and
-    // Car this gates the keyboard (WASD/Arrows + Space). For Patrol
+    // Input. For Character/Platformer/Top-Down and Car, this controls the
+    // built-in keyboard while script APIs can contribute in the same frame.
+    // With useDefaultInput=true, default and scripted input are combined and
+    // clamped to [-1,1]. With false, the default keyboard is disabled and the
+    // script/joystick channel is the only movement source. Patrol uses the
+    // same relationship for its automatic walk direction.
+    // For Patrol
     // specifically it instead gates Patrol's own built-in back-and-
     // forth auto-walk (see ControllerSystem.js's _applyPatrol) — ON
     // (default) walks back and forth with no input needed; turn OFF
@@ -75,6 +80,11 @@ export class CharacterController {
     brakeForce = 400, // how fast it brakes / goes into reverse (px/s^2)
     turnSpeed = 150, // max turn rate in deg/s (at full speed; scales down at lower speeds)
     driftFactor = 0.92, // 0-1: how much lateral velocity is retained (higher = more slide)
+    driveTowardArriveDistance = 12, // px from the target that counts as "arrived" for
+                                     // this.controller.simulateDriveToward(x, y) and
+                                     // this.navDriveToward(x, y) — inside this radius the
+                                     // car coasts/brakes to a stop instead of hunting for an
+                                     // exact heading to a point right under it.
 
     // Follow-specific (Follow controller only)
     targetName = "", // name of the entity to pursue
@@ -101,10 +111,9 @@ export class CharacterController {
 
     // Set (transiently, for one ControllerSystem update) by
     // this.controller.simulateMove(x, y) (see scripting/components/
-    // ControllerAPI.js) to drive movement from script logic instead of
-    // the keyboard — e.g. an on-screen button, an AI patrol routine,
-    // or a cutscene forcing the character to walk. -1..1 per axis, same
-    // convention as the keyboard's own (right?1:0)-(left?1:0) read.
+    // ControllerAPI.js) as a script/joystick movement contribution. When
+    // useDefaultInput=true it is added to the keyboard axis; when false it
+    // is the only movement source. -1..1 per axis, with analog values kept.
     // Consumed and reset to null by ControllerSystem.js right after
     // reading it each update — a one-shot per-frame request, same
     // pattern as requestJump above, NOT a standing value a script must
@@ -113,6 +122,50 @@ export class CharacterController {
     // script wants movement to continue, exactly like a held key).
     requestMoveX = null,
     requestMoveY = null,
+
+    // Set (transiently, for one ControllerSystem update) by
+    // this.controller.simulateDrive(throttle, steer) (see scripting/
+    // components/ControllerAPI.js), Car-only. Drives Car exactly like
+    // requestMoveX/Y drives the walk family — a one-shot per-frame
+    // request consumed and reset to null by ControllerSystem.js's
+    // _applyCar right after reading it. throttle: -1..1 (1 = full
+    // accelerate, -1 = full brake/reverse, matching Up/Down). steer:
+    // -1..1 (1 = full right, -1 = full left, matching Right/Left).
+    // Only takes effect while useDefaultInput is off; call it every
+    // frame you want the car driven, exactly like holding a key —
+    // see simulateDrive()'s own doc comment in ControllerAPI.js.
+    requestThrottle = null,
+    requestSteer = null,
+
+    // Set (transiently, for one ControllerSystem update) by
+    // this.controller.simulateDriveJoystick(x, y) (see scripting/
+    // components/ControllerAPI.js), Car-only. Unlike simulateDrive(), this
+    // is a true twin-stick-style directional car control: x/y describe the
+    // joystick direction, magnitude controls acceleration, and the car
+    // smoothly turns toward the joystick direction. Consumed and reset to
+    // null by ControllerSystem.js after each update.
+    requestJoystickX = null,
+    requestJoystickY = null,
+
+    // Set (transiently, for one ControllerSystem update) by
+    // this.controller.simulateDriveToward(x, y) (see scripting/
+    // components/ControllerAPI.js), Car-only. "Autopilot" car input: unlike
+    // simulateDrive()/simulateDriveJoystick() (which take throttle/steer or
+    // a joystick direction), this takes a world-space POINT and
+    // ControllerSystem._applyCar works out the throttle/steer itself every
+    // frame — deciding whether to drive forward or reverse toward it
+    // (whichever needs less turning, so the car doesn't drive there
+    // backwards just because that's the shorter turn) and easing off the
+    // throttle as it nears the point so it doesn't overshoot and loop back.
+    // Still goes through the exact same accelerate/brake/steer/drift math
+    // as every other Car input source, so maxSpeed/carAcceleration/
+    // brakeForce/turnSpeed/driftFactor from the Inspector (or a script) all
+    // apply automatically — this is a steering target, not a separate
+    // movement mode. One-shot per-frame request, same consumed-and-reset
+    // pattern as requestThrottle/requestSteer above — call it every frame
+    // you want the car still heading there.
+    requestDriveTowardX = null,
+    requestDriveTowardY = null,
 
     // Set (transiently, for one ControllerSystem update) by
     // this.controller.flipDirection() (see scripting/components/
@@ -143,6 +196,7 @@ export class CharacterController {
     this.brakeForce = brakeForce;
     this.turnSpeed = turnSpeed;
     this.driftFactor = driftFactor;
+    this.driveTowardArriveDistance = driveTowardArriveDistance;
 
     this.targetName = targetName;
     this.followSpeed = followSpeed;
@@ -153,6 +207,12 @@ export class CharacterController {
     this.requestJump = requestJump;
     this.requestMoveX = requestMoveX;
     this.requestMoveY = requestMoveY;
+    this.requestThrottle = requestThrottle;
+    this.requestSteer = requestSteer;
+    this.requestJoystickX = requestJoystickX;
+    this.requestJoystickY = requestJoystickY;
+    this.requestDriveTowardX = requestDriveTowardX;
+    this.requestDriveTowardY = requestDriveTowardY;
     this.requestFlip = requestFlip;
   }
 }

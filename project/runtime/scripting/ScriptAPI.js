@@ -45,6 +45,7 @@
  */
 
 import { TRANSFORM } from "../components/Transform.js";
+import { clientToLocal, prepareGameCanvas } from "../core/MobileViewport.js";
 import { SCRIPT } from "../components/Script.js";
 import { COLLIDER_2D } from "../components/Collider2D.js";
 import { SPRITE_RENDERER } from "../components/SpriteRenderer.js";
@@ -60,7 +61,7 @@ import { CAMERA } from "../components/Camera.js";
 import { AUDIO_SOURCE } from "../components/AudioSource.js";
 import { AUDIO_LISTENER } from "../components/AudioListener.js";
 import { NAV_AGENT_2D } from "../components/NavAgent2D.js";
-import { CHARACTER_CONTROLLER } from "../components/CharacterController.js";
+import { CHARACTER_CONTROLLER, ControllerType } from "../components/CharacterController.js";
 import { cloneEntity } from "../scene/SceneSerializer.js";
 import { createTransformAPI } from "./components/TransformAPI.js";
 import { createSpriteAPI } from "./components/SpriteAPI.js";
@@ -224,6 +225,68 @@ class EntityContext {
     opts = opts || {};
     if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) return false;
     var navAgent = this._entity.getComponent(NAV_AGENT_2D);
+    var dt = Math.max(0, this._scriptApi.time.deltaTime || 0);
+
+    if (!this._navMoveState) {
+      this._navMoveState = {
+        path: null,
+        index: 0,
+        repathTimer: 0,
+        goalX: 0,
+        goalY: 0,
+        plannedX: 0,
+        plannedY: 0,
+        rawTargetX: 0,
+        rawTargetY: 0,
+        targetVX: 0,
+        targetVY: 0,
+        hasRawTarget: false,
+        currentSpeed: 0,
+        routeDirX: 0,
+        routeDirY: 0,
+      };
+    }
+    var state = this._navMoveState;
+
+    // Track the target instead of treating every navMoveToward() call as a
+    // completely new static point. A moving target gets a small, bounded
+    // look-ahead prediction based on its recent velocity. This is the same
+    // general idea used by game AI steering: pathfind toward where the
+    // target is likely to be, then continuously re-plan as that prediction
+    // changes. The cap keeps fast targets from making agents visibly
+    // over-lead corners or teleporting their goal far ahead.
+    if (state.hasRawTarget && dt > 0.000001) {
+      var rawVX = (targetX - state.rawTargetX) / dt;
+      var rawVY = (targetY - state.rawTargetY) / dt;
+      var rawSpeed = Math.hypot(rawVX, rawVY);
+      if (Number.isFinite(rawSpeed)) {
+        var maxTrackedSpeed = Math.max(120, (navAgent ? navAgent.speed : 120) * 2.5);
+        if (rawSpeed > maxTrackedSpeed) {
+          var scale = maxTrackedSpeed / rawSpeed;
+          rawVX *= scale;
+          rawVY *= scale;
+        }
+        // Exponential smoothing prevents jitter when the target itself is
+        // driven by input/camera samples that move by only a few pixels.
+        var velocityBlend = 1 - Math.exp(-12 * dt);
+        state.targetVX += (rawVX - state.targetVX) * velocityBlend;
+        state.targetVY += (rawVY - state.targetVY) * velocityBlend;
+      }
+    } else {
+      state.targetVX = 0;
+      state.targetVY = 0;
+    }
+    state.rawTargetX = targetX;
+    state.rawTargetY = targetY;
+    state.hasRawTarget = true;
+
+    var baseSpeedForPrediction = Number.isFinite(speed) ? Math.max(0, speed) : (navAgent ? navAgent.speed : 120);
+    var targetDistanceNow = Math.hypot(targetX - this.x, targetY - this.y);
+    var predictionTime = baseSpeedForPrediction > 0
+      ? Math.min(0.35, Math.max(0, targetDistanceNow / baseSpeedForPrediction))
+      : 0;
+    var predictedTargetX = targetX + state.targetVX * predictionTime;
+    var predictedTargetY = targetY + state.targetVY * predictionTime;
 
     // Collaboration: when several collabEnabled agents are all heading
     // toward roughly the same point, redirect EACH agent to its own
@@ -236,13 +299,19 @@ class EntityContext {
     // around obstacles toward ITS OWN side of the target rather than
     // toward the same point and then fighting over the last few pixels.
     if (navAgent && navAgent.collabEnabled) {
-      var slot = this._applyNavCollab(navAgent, targetX, targetY);
+      // Give the collaboration layer the predicted target, not just the
+      // target's last sampled position. That lets a group keep formation
+      // while the player is running instead of repeatedly converging on
+      // where the player WAS.
+      var slot = this._applyNavCollab(navAgent, predictedTargetX, predictedTargetY);
       targetX = slot.x;
       targetY = slot.y;
+    } else {
+      targetX = predictedTargetX;
+      targetY = predictedTargetY;
     }
 
-    speed = Number.isFinite(speed) ? Math.max(0, speed) : (navAgent ? navAgent.speed : 120);
-    var dt = Math.max(0, this._scriptApi.time.deltaTime || 0);
+    speed = baseSpeedForPrediction;
     var autoRepath = navAgent ? navAgent.autoRepath : true;
     var repathInterval = opts.repathInterval !== undefined
       ? Math.max(0.05, opts.repathInterval)
@@ -259,12 +328,8 @@ class EntityContext {
     var body = this.rigidbody;
     var canUseBody = body && body.type !== "Static";
 
-    if (!this._navMoveState) {
-      this._navMoveState = { path: null, index: 0, repathTimer: 0, goalX: 0, goalY: 0 };
-    }
-    var state = this._navMoveState;
     state.repathTimer -= dt;
-    var targetMoved = state.path && Math.hypot(targetX - state.goalX, targetY - state.goalY) > targetChangeDistance;
+    var targetMoved = !state.path || Math.hypot(targetX - state.plannedX, targetY - state.plannedY) > targetChangeDistance;
 
     // With autoRepath off, only (re)plan once (no path yet) or when the
     // target itself moved far enough to invalidate the current route —
@@ -275,17 +340,46 @@ class EntityContext {
 
     if (shouldRepath) {
       state.repathTimer = repathInterval;
-      var freshPath = this._scriptApi._findNavPath(this.x, this.y, targetX, targetY, { debug: opts.debug, radius: agentRadius, area: agentArea });
+      var freshPath = this._scriptApi._findNavPath(this.x, this.y, targetX, targetY, { debug: opts.debug, radius: agentRadius, area: agentArea, areaCosts: navAgent ? navAgent.areaCosts : null });
       if (!freshPath || freshPath.length === 0) {
-        state.path = null;
+        // Before just holding position (the old behavior, still correct
+        // for a genuinely unreachable GOAL), check whether the problem
+        // is actually that WE are standing somewhere our own
+        // radius/area disallows — e.g. pushed into a zone, or spawned
+        // there. If so, treat the nearest legal ground as a one-point
+        // "path" and let the normal waypoint-following code below drive
+        // us there with its own accel/decel/avoidance, instead of
+        // freezing forever inside the disallowed zone — see
+        // _escapeDisallowedArea()'s doc comment for the full reasoning.
+        // The very next repath cycle after escaping succeeds normally
+        // on its own; no other state needs special-casing.
+        var escape = this._escapeDisallowedArea(navAgent, agentRadius, agentArea);
+        if (escape) {
+          state.path = [escape];
+          state.index = 0;
+          state.goalX = targetX;
+          state.goalY = targetY;
+          // Force a real repath attempt again next call instead of
+          // waiting out the full interval — as soon as we're back on
+          // legal ground the normal path to the real goal should take
+          // over immediately, not one interval later.
+          state.repathTimer = 0;
+          state.plannedX = Infinity;
+          state.plannedY = Infinity;
+        } else {
+          state.path = null;
+          state.index = 0;
+          if (canUseBody) body.velocity = { x: 0, y: 0 };
+          return false;
+        }
+      } else {
+        state.path = freshPath;
         state.index = 0;
-        if (canUseBody) body.velocity = { x: 0, y: 0 };
-        return false;
+        state.goalX = targetX;
+        state.goalY = targetY;
+        state.plannedX = targetX;
+        state.plannedY = targetY;
       }
-      state.path = freshPath;
-      state.index = 0;
-      state.goalX = targetX;
-      state.goalY = targetY;
     }
 
     var path = state.path;
@@ -316,14 +410,82 @@ class EntityContext {
     }
 
     if (canUseBody) {
-      if (speed <= 0 || distance <= 0.000001) {
+      if (distance <= 0.000001) {
         body.velocity = { x: 0, y: 0 };
+        state.currentSpeed = Math.max(0, state.currentSpeed - (navAgent ? navAgent.deceleration : 1000) * dt);
         return false;
       }
-      var dirX = (waypoint.x - this.x) / distance;
-      var dirY = (waypoint.y - this.y) / distance;
+      // Follow the weighted route as a continuous corridor instead of
+      // aiming at every raw A* point independently. The look-ahead is
+      // deliberately capped at the NEXT turn, so smoothing can never
+      // invent a shortcut across a different Nav Area (for example from
+      // a cheap Road into expensive Ground). On straight portions this
+      // produces a stable tangent direction; at turns the existing
+      // acceleration-limited velocity transition rounds the heading
+      // naturally without leaving the selected route.
+      var routeAim = this._navWalkPathPreview(
+        path, state.index, this.x, this.y,
+        Math.max(10, Math.min(48, speed * Math.max(dt, 1 / 60) * 3.5))
+      );
+      var aimDistance = Math.hypot(routeAim.x - this.x, routeAim.y - this.y);
+      if (aimDistance < 0.000001) {
+        routeAim.x = waypoint.x;
+        routeAim.y = waypoint.y;
+        aimDistance = distance;
+      }
+      var dirX = (routeAim.x - this.x) / Math.max(0.000001, aimDistance);
+      var dirY = (routeAim.y - this.y) / Math.max(0.000001, aimDistance);
+
+      // Low-cost areas are a preferred corridor, not a reason to oscillate
+      // between neighboring cells. Smooth the route direction itself, but
+      // keep the blend responsive enough to follow a real corner.
+      var routeBlend = 1 - Math.exp(-Math.max(6, (navAgent ? navAgent.acceleration : 800) / 100) * dt);
+      if (Number.isFinite(state.routeDirX) && Number.isFinite(state.routeDirY) && Math.hypot(state.routeDirX, state.routeDirY) > 0.001) {
+        state.routeDirX += (dirX - state.routeDirX) * routeBlend;
+        state.routeDirY += (dirY - state.routeDirY) * routeBlend;
+        var routeLen = Math.hypot(state.routeDirX, state.routeDirY);
+        if (routeLen > 0.000001) {
+          dirX = state.routeDirX / routeLen;
+          dirY = state.routeDirY / routeLen;
+        }
+      } else {
+        state.routeDirX = dirX;
+        state.routeDirY = dirY;
+      }
       var steered = this._applyNavAvoidance(navAgent, agentRadius, dirX, dirY);
-      body.velocity = { x: steered.x * speed, y: steered.y * speed };
+
+      // Slow down as the agent approaches the final destination, while
+      // keeping full speed through ordinary intermediate corners. Then
+      // approach the desired velocity using acceleration/deceleration
+      // rather than snapping velocity every frame. This is what makes a
+      // chasing group feel like moving characters instead of path points
+      // teleporting between headings.
+      var desiredSpeed = speed;
+      if (state.index === lastIndex) {
+        var brakingDistance = Math.max(8, speed * speed / Math.max(1, (navAgent ? navAgent.deceleration : 1000) * 2));
+        if (distance < brakingDistance) {
+          desiredSpeed *= Math.max(0, Math.min(1, distance / brakingDistance));
+        }
+      }
+
+      var desiredVX = steered.x * desiredSpeed;
+      var desiredVY = steered.y * desiredSpeed;
+      var currentVX = Number.isFinite(body.velocity && body.velocity.x) ? body.velocity.x : 0;
+      var currentVY = Number.isFinite(body.velocity && body.velocity.y) ? body.velocity.y : 0;
+      var deltaVX = desiredVX - currentVX;
+      var deltaVY = desiredVY - currentVY;
+      var deltaLen = Math.hypot(deltaVX, deltaVY);
+      var accelRate = desiredSpeed < Math.hypot(currentVX, currentVY)
+        ? (navAgent ? navAgent.deceleration : 1000)
+        : (navAgent ? navAgent.acceleration : 800);
+      var maxDelta = Math.max(0, accelRate * dt);
+      if (deltaLen > maxDelta && deltaLen > 0.000001) {
+        var f = maxDelta / deltaLen;
+        deltaVX *= f;
+        deltaVY *= f;
+      }
+      body.velocity = { x: currentVX + deltaVX, y: currentVY + deltaVY };
+      state.currentSpeed = Math.hypot(body.velocity.x, body.velocity.y);
       return true;
     }
 
@@ -334,7 +496,25 @@ class EntityContext {
     // stepping beyond a waypoint. This prevents high-speed agents from
     // oscillating on opposite sides of a turn, and lets them cross more
     // than one tiny path segment in a slow frame without pausing.
-    var remaining = speed * dt;
+    var desiredDirectSpeed = speed;
+    if (state.index === lastIndex && distance > 0) {
+      var directBrakeDistance = Math.max(8, speed * speed / Math.max(1, (navAgent ? navAgent.deceleration : 1000) * 2));
+      if (distance < directBrakeDistance) {
+        desiredDirectSpeed *= Math.max(0, Math.min(1, distance / directBrakeDistance));
+      }
+    }
+    var directAccel = desiredDirectSpeed < state.currentSpeed
+      ? (navAgent ? navAgent.deceleration : 1000)
+      : (navAgent ? navAgent.acceleration : 800);
+    if (dt > 0) {
+      var directDelta = desiredDirectSpeed - state.currentSpeed;
+      var directMaxDelta = directAccel * dt;
+      if (Math.abs(directDelta) <= directMaxDelta) state.currentSpeed = desiredDirectSpeed;
+      else state.currentSpeed += Math.sign(directDelta) * directMaxDelta;
+    } else {
+      state.currentSpeed = desiredDirectSpeed;
+    }
+    var remaining = state.currentSpeed * dt;
     var moved = false;
     while (remaining > 0) {
       waypoint = path[state.index];
@@ -354,7 +534,18 @@ class EntityContext {
       }
 
       var step = Math.min(remaining, distance);
-      var stepDir = this._applyNavAvoidance(navAgent, agentRadius, dx / distance, dy / distance);
+      // Direct-transform agents used to point exactly at each raw A*
+      // waypoint. That made a curved road look like a sequence of tiny
+      // stop-turn-go corners. Use the same route-tangent solver as the
+      // rigidbody branch so the heading bends continuously as we enter and
+      // leave a corner, while the actual navigation polyline remains the
+      // authoritative route. The blend is deliberately local to the next
+      // corner so it cannot invent a long diagonal through another area.
+      var smoothDir = this._navSmoothRouteDirection(
+        path, state.index, this.x, this.y,
+        Math.max(6, Math.min(28, speed * Math.max(dt, 1 / 60) * 2.5))
+      );
+      var stepDir = this._applyNavAvoidance(navAgent, agentRadius, smoothDir.x, smoothDir.y);
       this.x += stepDir.x * step;
       this.y += stepDir.y * step;
       remaining -= step;
@@ -370,6 +561,460 @@ class EntityContext {
       }
     }
     return moved;
+  }
+
+  /**
+   * Car-controller counterpart to navMoveToward(): paths to
+   * (targetX,targetY) over the shared NavWorld2D exactly like
+   * navMoveToward() does (same repath timer, waypoint advancement,
+   * target-velocity prediction, and NavAgent2D avoidance/collab
+   * steering), but instead of moving the entity like a top-down point,
+   * it drives it like an actual car — accelerating, braking, steering,
+   * and drifting through turns via the SAME Car physics
+   * ControllerSystem._applyCar already uses for simulateDrive()/
+   * simulateDriveToward() (see CharacterController.js's Car-specific
+   * tunables: maxSpeed, carAcceleration, brakeForce, turnSpeed,
+   * driftFactor — every one of them still applies here).
+   *
+   * Requires BOTH a Car-type CharacterController AND a NavAgent2D on
+   * this entity — the Movement Type supplies the actual driving/drift
+   * feel, the Nav Agent supplies the path + obstacle avoidance. Without
+   * either one this returns false and does nothing (see the two
+   * component checks below) rather than silently falling back to a
+   * different movement style.
+   *
+   *   this.navDriveToward(target.x, target.y, 220);
+   *
+   * Call it once per onUpdate() — like navMoveToward(), it re-plans on
+   * its own schedule (NavAgent2D.autoRepath/repathInterval/
+   * repathDistance) rather than needing a fresh path every call.
+   *
+   * WHY THIS EXISTS SEPARATELY FROM navMoveToward(): navMoveToward()
+   * moves an entity directly toward each waypoint (fine for a top-down
+   * character), but a car can't strafe sideways to a waypoint — it has
+   * to actually steer there, and it needs to know its own front from
+   * its back so it drives forward into a turn instead of continuing to
+   * reverse away from where it's chasing something (see
+   * _resolveDriveTowardInput()'s doc comment in ControllerSystem.js for
+   * the forward-vs-reverse decision this shares with
+   * simulateDriveToward()). This method is what makes a Car+NavAgent2D
+   * NPC behave like a chase-car — pathing around obstacles like a nav
+   * agent, but handling like a car while it does it.
+   *
+   * DELIBERATELY HAS NO "no path found" straight-line fallback, same
+   * reasoning as navMoveToward() — see that method's doc comment.
+   *
+   * @param {number} targetX @param {number} targetY world-space goal
+   * @param {number} [speed] px/sec top speed for this call — defaults to
+   *   this entity's NavAgent2D.speed if present, otherwise 120. Feeds the
+   *   waypoint-arrival braking math the same way navMoveToward()'s speed
+   *   argument does; the car's OWN maxSpeed/carAcceleration/brakeForce
+   *   still govern how it actually reaches that speed.
+   * @param {{ repathInterval?: number, arriveDist?: number, finalArriveDist?: number, targetChangeDistance?: number, debug?: boolean }} [opts]
+   *   Same meaning as navMoveToward()'s opts — see that method's doc
+   *   comment. Also defined in NAV_API_OPTION_FIELDS.navDriveToward for
+   *   editor `{ ... }` completion.
+   * @returns {boolean} true if actively driving (or already arrived),
+   *   false if no path exists right now, or if this entity is missing
+   *   its Car controller or NavAgent2D.
+   */
+  navDriveToward(targetX, targetY, speed, opts) {
+    opts = opts || {};
+    if (!Number.isFinite(targetX) || !Number.isFinite(targetY)) return false;
+
+    var controllerComponent = this._entity.getComponent(CHARACTER_CONTROLLER);
+    if (!controllerComponent || controllerComponent.controllerType !== ControllerType.CAR) {
+      return false;
+    }
+    var navAgent = this._entity.getComponent(NAV_AGENT_2D);
+    if (!navAgent) return false;
+
+    var dt = Math.max(0, this._scriptApi.time.deltaTime || 0);
+
+    if (!this._navDriveState) {
+      this._navDriveState = {
+        path: null,
+        index: 0,
+        repathTimer: 0,
+        plannedX: 0,
+        plannedY: 0,
+        rawTargetX: 0,
+        rawTargetY: 0,
+        targetVX: 0,
+        targetVY: 0,
+        hasRawTarget: false,
+      };
+    }
+    var state = this._navDriveState;
+
+    // Same bounded target-velocity prediction navMoveToward() uses —
+    // pathfind toward where a moving target is likely to be instead of
+    // where it was a frame ago, re-smoothed every call.
+    if (state.hasRawTarget && dt > 0.000001) {
+      var rawVX = (targetX - state.rawTargetX) / dt;
+      var rawVY = (targetY - state.rawTargetY) / dt;
+      var rawSpeed = Math.hypot(rawVX, rawVY);
+      if (Number.isFinite(rawSpeed)) {
+        var maxTrackedSpeed = Math.max(120, (navAgent.speed || 120) * 2.5);
+        if (rawSpeed > maxTrackedSpeed) {
+          var scale = maxTrackedSpeed / rawSpeed;
+          rawVX *= scale;
+          rawVY *= scale;
+        }
+        var velocityBlend = 1 - Math.exp(-12 * dt);
+        state.targetVX += (rawVX - state.targetVX) * velocityBlend;
+        state.targetVY += (rawVY - state.targetVY) * velocityBlend;
+      }
+    } else {
+      state.targetVX = 0;
+      state.targetVY = 0;
+    }
+    state.rawTargetX = targetX;
+    state.rawTargetY = targetY;
+    state.hasRawTarget = true;
+
+    var baseSpeed = Number.isFinite(speed) ? Math.max(0, speed) : (navAgent.speed || 120);
+    var targetDistanceNow = Math.hypot(targetX - this.x, targetY - this.y);
+    var predictionTime = baseSpeed > 0
+      ? Math.min(0.35, Math.max(0, targetDistanceNow / baseSpeed))
+      : 0;
+    var predictedTargetX = targetX + state.targetVX * predictionTime;
+    var predictedTargetY = targetY + state.targetVY * predictionTime;
+
+    // Collaboration (group-surround) reuses the exact same slotting the
+    // walking navMoveToward() uses — a mixed group of Car and walking
+    // NavAgent2D NPCs converging on the same point still spreads out
+    // into shared ring slots instead of each movement style solving it
+    // independently.
+    if (navAgent.collabEnabled) {
+      var slot = this._applyNavCollab(navAgent, predictedTargetX, predictedTargetY);
+      targetX = slot.x;
+      targetY = slot.y;
+    } else {
+      targetX = predictedTargetX;
+      targetY = predictedTargetY;
+    }
+
+    var autoRepath = navAgent.autoRepath;
+    var repathInterval = opts.repathInterval !== undefined
+      ? Math.max(0.05, opts.repathInterval)
+      : Math.max(0.05, navAgent.repathInterval);
+    var arriveDist = opts.arriveDist === undefined ? 4 : Math.max(0.01, opts.arriveDist);
+    var finalArriveDist = opts.finalArriveDist !== undefined
+      ? Math.max(0.01, opts.finalArriveDist)
+      : Math.max(0.01, navAgent.stoppingDistance);
+    var targetChangeDistance = opts.targetChangeDistance !== undefined
+      ? Math.max(0.01, opts.targetChangeDistance)
+      : Math.max(navAgent.repathDistance, arriveDist);
+    var agentRadius = navAgent.radius;
+    var agentArea = navAgent.area;
+
+    state.repathTimer -= dt;
+    var targetMoved = !state.path || Math.hypot(targetX - state.plannedX, targetY - state.plannedY) > targetChangeDistance;
+    var shouldRepath = !state.path || targetMoved || (autoRepath && state.repathTimer <= 0);
+
+    if (shouldRepath) {
+      state.repathTimer = repathInterval;
+      var freshPath = this._scriptApi._findNavPath(this.x, this.y, targetX, targetY, { debug: opts.debug, radius: agentRadius, area: agentArea, areaCosts: navAgent ? navAgent.areaCosts : null });
+      if (!freshPath || freshPath.length === 0) {
+        // Same "am I illegally standing in a disallowed area" recovery
+        // as navMoveToward() above — see _escapeDisallowedArea()'s doc
+        // comment. A one-point escape "path" is handed to the normal
+        // waypoint-following/simulateDriveToward() code below, so the
+        // car actually DRIVES out (steering, accel/brake — not
+        // teleporting), and the very next repath after arriving there
+        // retries the real goal automatically.
+        var escape = this._escapeDisallowedArea(navAgent, agentRadius, agentArea);
+        if (escape) {
+          state.path = [escape];
+          state.index = 0;
+          state.repathTimer = 0;
+          state.plannedX = Infinity;
+          state.plannedY = Infinity;
+        } else {
+          state.path = null;
+          state.index = 0;
+          this.controller.simulateDrive(0, 0);
+          return false;
+        }
+      } else {
+        state.path = freshPath;
+        state.index = 0;
+        state.plannedX = targetX;
+        state.plannedY = targetY;
+      }
+    }
+
+    var path = state.path;
+    var lastIndex = path.length - 1;
+    var waypoint = path[state.index];
+    var distanceToWaypoint = Math.hypot(waypoint.x - this.x, waypoint.y - this.y);
+    var vehicleState = state.vehicle || (state.vehicle = {
+      steer: 0,
+      desiredSpeed: 0,
+      stuckTime: 0,
+      recoveryTimer: 0,
+      recoverySign: 1,
+      obstacleTime: 0,
+      lastX: this.x,
+      lastY: this.y,
+      lastProgressTimer: 0,
+      lastPathIndex: state.index,
+    });
+
+    var waypointThreshold = Math.max(arriveDist, baseSpeed * dt + 0.25);
+    while (state.index < lastIndex) {
+      waypoint = path[state.index];
+      distanceToWaypoint = Math.hypot(waypoint.x - this.x, waypoint.y - this.y);
+      if (distanceToWaypoint > waypointThreshold) break;
+      state.index++;
+    }
+    waypoint = path[state.index];
+    distanceToWaypoint = Math.hypot(waypoint.x - this.x, waypoint.y - this.y);
+
+    if (state.index === lastIndex && distanceToWaypoint <= finalArriveDist) {
+      this.controller.simulateDrive(0, 0);
+      vehicleState.steer = 0;
+      vehicleState.desiredSpeed = 0;
+      vehicleState.stuckTime = 0;
+      return true;
+    }
+
+    const rb = this._entity.getComponent(RIGIDBODY_2D);
+    const rbVx = rb ? Number(rb.velocityX) || 0 : 0;
+    const rbVy = rb ? Number(rb.velocityY) || 0 : 0;
+    const actualSpeed = Math.hypot(rbVx, rbVy);
+    const currentForwardRad = (this.rotation * Math.PI) / 180;
+    const currentForwardX = Math.sin(currentForwardRad);
+    const currentForwardY = -Math.cos(currentForwardRad);
+
+    // More speed -> farther lookahead. Hard corners deliberately use a
+    // shorter near sample so the car does not cut across the road.
+    const carComponent = this._entity.getComponent(CHARACTER_CONTROLLER);
+    const speed01 = Math.min(1, actualSpeed / Math.max(1, (Number(carComponent?.maxSpeed) || 350)));
+    const lookahead = Math.max(
+      Number(navAgent.vehicleLookahead) || 72,
+      (Number(navAgent.vehicleLookahead) || 72) * (0.75 + 1.55 * speed01)
+    );
+    const preview = this._navCarPathPreview(
+      path, state.index, this.x, this.y,
+      lookahead,
+      Number(navAgent.vehicleCornerLookahead) || 110
+    );
+
+    var aimX = preview.x, aimY = preview.y;
+    var distToAim = Math.hypot(aimX - this.x, aimY - this.y);
+    if (distToAim < 1e-4) { aimX = waypoint.x; aimY = waypoint.y; distToAim = distanceToWaypoint; }
+
+    // Agent avoidance is applied to a route tangent, not to a raw waypoint.
+    // On a curve the tangent is gradually rotated toward the next segment
+    // before the corner, which lets the car steer through the bend instead
+    // of making a square waypoint-to-waypoint turn. The actual aim point is
+    // still sampled on the navigation polyline, so area restrictions remain
+    // authoritative.
+    var aimDirX = (aimX - this.x) / Math.max(1e-5, distToAim);
+    var aimDirY = (aimY - this.y) / Math.max(1e-5, distToAim);
+    if (Number.isFinite(preview.tangentX) && Number.isFinite(preview.tangentY) && (Math.abs(preview.tangentX) + Math.abs(preview.tangentY) > 0.001)) {
+      const tangentBlend = preview.tangentBlend !== undefined ? Math.max(0, Math.min(1, preview.tangentBlend)) : 0.75;
+      aimDirX = aimDirX * (1 - tangentBlend) + preview.tangentX * tangentBlend;
+      aimDirY = aimDirY * (1 - tangentBlend) + preview.tangentY * tangentBlend;
+      const tangentLen = Math.hypot(aimDirX, aimDirY);
+      if (tangentLen > 1e-5) { aimDirX /= tangentLen; aimDirY /= tangentLen; }
+    }
+    var steered = this._applyNavAvoidance(navAgent, agentRadius, aimDirX, aimDirY);
+
+    // Local physics scan: dynamic/late obstacles can exist after the last
+    // Nav bake. Pick the clearer side and request a faster repath if one
+    // stays in the lane for several frames.
+    var targetForScanX = aimX, targetForScanY = aimY;
+    var obstacle = this._navCarScanObstacles(
+      { x: this.x, y: this.y, rotation: this.rotation },
+      navAgent, actualSpeed, targetForScanX, targetForScanY
+    );
+    if (obstacle.blocked) {
+      vehicleState.obstacleTime += dt;
+      if (vehicleState.obstacleTime > 0.18) state.repathTimer = 0;
+    } else {
+      vehicleState.obstacleTime = Math.max(0, vehicleState.obstacleTime - dt * 2);
+    }
+
+    if (Math.abs(obstacle.steer) > 0.001) {
+      // Lateral avoidance vector around the obstacle, blended with route
+      // direction. The blend is capped so an obstacle cannot make the car
+      // instantly reverse its steering direction.
+      const sideX = -currentForwardY * obstacle.steer;
+      const sideY = currentForwardX * obstacle.steer;
+      steered.x = steered.x * 0.72 + sideX * 0.28;
+      steered.y = steered.y * 0.72 + sideY * 0.28;
+      const len = Math.hypot(steered.x, steered.y);
+      if (len > 1e-5) { steered.x /= len; steered.y /= len; }
+    }
+
+    const desiredAngle = Math.atan2(steered.x, -steered.y);
+    let angleError = desiredAngle - currentForwardRad;
+    while (angleError > Math.PI) angleError -= Math.PI * 2;
+    while (angleError < -Math.PI) angleError += Math.PI * 2;
+
+    // Pure-pursuit-inspired steering: angle demand grows with lookahead
+    // geometry, then is rate-smoothed through the car's normal steer axis.
+    const wheelBaseLike = Math.max(20, Math.min(140, lookahead * 0.55));
+    const curvature = (2 * Math.sin(angleError)) / Math.max(1, wheelBaseLike);
+    let desiredSteer = Math.max(-1, Math.min(1, curvature * 85));
+    desiredSteer += Math.max(-0.35, Math.min(0.35, obstacle.steer * 0.55));
+
+    // A tiny heading stabilization term reduces the robotic “hunt” along
+    // successive grid cells without freezing steering near a real corner.
+    desiredSteer += Math.max(-0.15, Math.min(0.15, Math.sin(angleError) * 0.12));
+    desiredSteer = Math.max(-1, Math.min(1, desiredSteer));
+    vehicleState.steer = this._navCarSmoothSignal(
+      Number(vehicleState.steer) || 0,
+      desiredSteer,
+      dt,
+      Number(navAgent.vehicleSteerSmoothing) || 7
+    );
+
+    const maxSpeed = Math.max(1, Number(carComponent?.maxSpeed) || Number(navAgent.speed) || 350);
+    const requestedSpeed = Math.max(1, Number.isFinite(speed) ? Math.abs(speed) : (Number(navAgent.speed) || maxSpeed));
+    const turnSeverity = Math.min(1, Math.abs(angleError) / (Math.PI * 0.55));
+    const cornerSeverity = Math.max(0, Math.min(1, preview.cornerSeverity * 1.7));
+    const cornerFactor = 1 - cornerSeverity * (1 - (Number(navAgent.vehicleCornerSlowdown) || 0.72));
+    const headingFactor = 0.25 + 0.75 * Math.max(0, Math.cos(angleError));
+    const obstacleFactor = 1 - Math.max(0, Math.min(0.92, obstacle.brake * (Number(navAgent.vehicleObstacleBrake) || 0.9)));
+
+    // Use a physically meaningful stopping-distance estimate. The car starts
+    // braking before a final point or hard corner instead of discovering the
+    // need for braking after it has already passed the turn.
+    const brakeAccel = Math.max(40, Number(carComponent?.brakeForce) || Number(navAgent.deceleration) || 1000);
+    const stoppingDistance = (actualSpeed * actualSpeed) / (2 * brakeAccel);
+    const cornerBrakeWindow = Math.max(18, Number(navAgent.vehicleCornerLookahead) || 110);
+    const arrivalFactor = state.index === lastIndex
+      ? Math.max(0.05, Math.min(1, (distanceToWaypoint - finalArriveDist) / Math.max(1, stoppingDistance * 1.4 + finalArriveDist)))
+      : 1;
+    const cornerDistance = Number.isFinite(preview.cornerDistance) ? preview.cornerDistance : cornerBrakeWindow;
+    const cornerBraking = cornerDistance < cornerBrakeWindow
+      ? Math.max(0.25, 1 - cornerSeverity * Math.max(0, 1 - cornerDistance / cornerBrakeWindow))
+      : 1;
+
+    let targetSpeed = requestedSpeed;
+    targetSpeed = Math.min(targetSpeed, maxSpeed * (0.18 + 0.82 * headingFactor));
+    targetSpeed = Math.min(targetSpeed, maxSpeed * cornerFactor);
+    targetSpeed *= Math.max(0.22, cornerBraking);
+    targetSpeed *= obstacleFactor;
+    targetSpeed *= Math.max(0.08, arrivalFactor);
+
+    // Very sharp orientation errors should roll/brake instead of trying to
+    // spin the car in place. The existing controller already refuses to
+    // rotate at exactly zero speed, so this produces a natural slow pivot.
+    if (turnSeverity > 0.82 && actualSpeed > maxSpeed * 0.18) targetSpeed = Math.min(targetSpeed, maxSpeed * 0.28);
+
+    vehicleState.desiredSpeed = this._navCarSmoothSignal(
+      Number(vehicleState.desiredSpeed) || 0,
+      targetSpeed,
+      dt,
+      Number(navAgent.vehicleSpeedSmoothing) || 5
+    );
+
+    const speedError = vehicleState.desiredSpeed - actualSpeed;
+    let throttle = 0;
+    if (speedError > 8) {
+      throttle = Math.min(1, speedError / Math.max(35, Number(carComponent?.carAcceleration) || 200));
+    } else if (speedError < -10) {
+      throttle = -Math.min(1, Math.max(0.18, -speedError / Math.max(35, Number(carComponent?.brakeForce) || 360)));
+    }
+
+    // Stuck detection uses actual transform progress as well as measured
+    // speed. This catches a car pushing its way into an obstacle where its
+    // commanded velocity is high but the body is barely progressing.
+    const movedThisFrame = Math.hypot(this.x - vehicleState.lastX, this.y - vehicleState.lastY);
+    vehicleState.lastProgressTimer += dt;
+    const lowProgress = movedThisFrame < Math.max(0.35, actualSpeed * dt * 0.10);
+    if (distanceToWaypoint > Math.max(45, agentRadius * 2) && throttle > 0.35 && lowProgress && Math.abs(angleError) < Math.PI * 0.7) {
+      vehicleState.stuckTime += dt;
+    } else {
+      vehicleState.stuckTime = Math.max(0, vehicleState.stuckTime - dt * 1.5);
+    }
+    vehicleState.lastX = this.x;
+    vehicleState.lastY = this.y;
+
+    if (vehicleState.recoveryTimer > 0) {
+      vehicleState.recoveryTimer -= dt;
+      this.controller.simulateDrive(-0.72, vehicleState.recoverySign * 0.72);
+      if (vehicleState.recoveryTimer <= 0) {
+        vehicleState.stuckTime = 0;
+        state.repathTimer = 0;
+      }
+      return true;
+    }
+
+    if (vehicleState.stuckTime >= (Number(navAgent.vehicleRecoveryTime) || 1.35)) {
+      vehicleState.recoveryTimer = Number(navAgent.vehicleRecoveryReverseTime) || 0.9;
+      vehicleState.recoverySign = obstacle.steer !== 0
+        ? Math.sign(obstacle.steer)
+        : (Math.sign(Math.sin(angleError)) || 1);
+      this.controller.simulateDrive(-0.65, vehicleState.recoverySign * 0.78);
+      return true;
+    }
+
+    // The ControllerSystem's driveToward resolver supplies the gear logic
+    // (including committed reverse) while this local planner supplies the
+    // smooth, forward-looking point and obstacle response.
+    this.controller.simulateDriveToward(
+      this.x + steered.x * Math.max(lookahead * 0.9, 36),
+      this.y + steered.y * Math.max(lookahead * 0.9, 36)
+    );
+    // Add only the correction that the stock driveToward resolver cannot
+    // know: predictive braking for the NEXT corner/obstacle and a smoothed
+    // steering correction. Positive throttle is intentionally left to the
+    // normal resolver so acceleration is not double-counted.
+    this.controller.simulateDrive(Math.min(0, throttle), vehicleState.steer * 0.55);
+    return true;
+  }
+
+  /**
+   * Recovery strategy for an agent that finds itself standing somewhere
+   * ITS OWN radius+area disallows — e.g. spawned inside a zone its
+   * areaMask excludes, pushed into one by physics, or the zone's
+   * NavAreas paint changed underneath it. Without this, findGridPath's
+   * own start-snapping (AStar.js's nearestWalkable, max 4 rings) simply
+   * fails once the disallowed zone is wider than a few cells, findPath()
+   * returns null, and navMoveToward()/navDriveToward() would hold
+   * position FOREVER — indistinguishable from "the goal is genuinely
+   * unreachable" even though this is a completely different situation
+   * (the agent itself is illegally placed, not the goal). Holding
+   * position forever there is the "stuck and stops moving" bug this
+   * fixes.
+   *
+   * STRATEGY: when a repath attempt fails, separately check whether
+   * THIS agent's own current position is walkable for its own
+   * radius+area (regardless of the goal). If it's NOT, that's the real
+   * problem — search outward (via NavWorldSystem.
+   * nearestWalkablePointForAgent, a wider ring than findPath's own
+   * start-snap) for the nearest point this agent COULD legally stand,
+   * and steer directly toward THAT instead of the original goal until
+   * it's back on walkable ground — at that point the very next repath
+   * naturally succeeds and normal path-following resumes on its own,
+   * no special-case hand-off needed. If the agent's own position IS
+   * walkable (so this is a genuinely unreachable/unbaked goal instead),
+   * this returns null and the caller keeps its existing hold-position
+   * behavior — this only changes behavior for the specific "I'm
+   * somewhere I shouldn't be" case.
+   *
+   * @returns {{x:number,y:number}|null} an escape aim point, or null if
+   *   this agent's current position is already walkable (not the
+   *   problem) or no walkable point could be found nearby at all.
+   */
+  _escapeDisallowedArea(navAgent, agentRadius, agentArea) {
+    var agentAreaCosts = navAgent ? navAgent.areaCosts : null;
+    if (this._scriptApi._navIsWalkableForAgentFn &&
+        this._scriptApi._navIsWalkableForAgentFn(this.x, this.y, agentRadius, agentArea, agentAreaCosts)) {
+      return null;
+    }
+    var nearest = this._scriptApi._findNearestWalkable(this.x, this.y, agentRadius, agentArea, agentAreaCosts);
+    if (!nearest) return null;
+    // Already effectively there (e.g. right on the boundary) — nothing
+    // useful to steer toward.
+    if (Math.hypot(nearest.x - this.x, nearest.y - this.y) < 0.01) return null;
+    return nearest;
   }
 
   /**
@@ -402,6 +1047,268 @@ class EntityContext {
    * @param {number} dirX @param {number} dirY unit-length desired direction
    * @returns {{x:number,y:number}} unit-length (or zero) steered direction
    */
+  /**
+   * Returns a locally smoothed tangent for a navigation polyline. The agent
+   * keeps following the CURRENT route segment, but as it approaches a
+   * waypoint the outgoing tangent is blended in using a smoothstep curve.
+   * This produces a natural continuous bend on roads made from many grid
+   * cells without replacing the weighted A* route with a new shortcut.
+   */
+  _navSmoothRouteDirection(path, index, x, y, lookaheadDistance = 16) {
+    if (!Array.isArray(path) || path.length === 0) return { x: 1, y: 0 };
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    let i = Math.max(0, Math.min(path.length - 1, Number(index) || 0));
+    let wx = Number(path[i]?.x);
+    let wy = Number(path[i]?.y);
+    if (!Number.isFinite(wx) || !Number.isFinite(wy)) return { x: 1, y: 0 };
+
+    let dx = wx - x, dy = wy - y;
+    let distToCorner = Math.hypot(dx, dy);
+    if (distToCorner < 1e-5 && i < path.length - 1) {
+      i++;
+      wx = Number(path[i]?.x) || x;
+      wy = Number(path[i]?.y) || y;
+      dx = wx - x; dy = wy - y;
+      distToCorner = Math.hypot(dx, dy);
+    }
+    if (distToCorner < 1e-5) return { x: 1, y: 0 };
+
+    const inX = dx / distToCorner;
+    const inY = dy / distToCorner;
+    if (i >= path.length - 1) return { x: inX, y: inY };
+
+    const nx = (Number(path[i + 1]?.x) || 0) - wx;
+    const ny = (Number(path[i + 1]?.y) || 0) - wy;
+    const nextLen = Math.hypot(nx, ny);
+    if (nextLen < 1e-5) return { x: inX, y: inY };
+    const outX = nx / nextLen;
+    const outY = ny / nextLen;
+
+    // Only bend while inside a short window before the corner. The corner
+    // itself remains on the selected path, so this does not turn route
+    // smoothing into a hidden path replanner.
+    const window = Math.max(4, Math.min(32, Number(lookaheadDistance) || 16));
+    const t = 1 - clamp01(distToCorner / window);
+    let smooth = t * t * (3 - 2 * t);
+    // Gentle curves get a full tangent blend; tight grid corners get only a
+    // small blend so a walking agent cannot drift outside a narrow road.
+    const turnDot = Math.max(-1, Math.min(1, inX * outX + inY * outY));
+    const turnAngle = Math.acos(turnDot);
+    const gentleFactor = Math.max(0, Math.min(1, 1 - turnAngle / (Math.PI * 0.72)));
+    smooth *= gentleFactor;
+    let dirX = inX * (1 - smooth) + outX * smooth;
+    let dirY = inY * (1 - smooth) + outY * smooth;
+    const len = Math.hypot(dirX, dirY);
+    if (len < 1e-5) return { x: inX, y: inY };
+    return { x: dirX / len, y: dirY / len };
+  }
+
+  /**
+   * Walking NavAgent path preview. Unlike a generic look-ahead, this helper
+   * never skips across a corner: it samples only along the current route
+   * segment and caps the preview at that segment's next waypoint. That gives
+   * smooth tangent-following on long preferred-area corridors while keeping
+   * the exact weighted A* route authoritative at area boundaries and turns.
+   */
+  _navWalkPathPreview(path, index, x, y, lookaheadDistance) {
+    if (!Array.isArray(path) || path.length === 0) return { x, y };
+    let i = Math.max(0, Math.min(path.length - 1, Number(index) || 0));
+    let wx = Number(path[i]?.x);
+    let wy = Number(path[i]?.y);
+    if (!Number.isFinite(wx) || !Number.isFinite(wy)) return { x, y };
+
+    // If the agent is already essentially at the current waypoint, advance
+    // to the next segment. This avoids a one-frame reverse twitch at turns.
+    let dx = wx - x, dy = wy - y;
+    let distanceToWaypoint = Math.hypot(dx, dy);
+    if (distanceToWaypoint < 1e-4 && i < path.length - 1) {
+      i++;
+      wx = Number(path[i].x) || x;
+      wy = Number(path[i].y) || y;
+      dx = wx - x;
+      dy = wy - y;
+      distanceToWaypoint = Math.hypot(dx, dy);
+    }
+
+    if (distanceToWaypoint <= 1e-5) return { x: wx, y: wy };
+
+    // Never preview beyond the next waypoint. The next segment may belong
+    // to a different side of a weighted-area boundary, and crossing the
+    // corner early would turn a smooth visual aim into a real shortcut.
+    const distance = Math.min(Math.max(1, Number(lookaheadDistance) || 16), distanceToWaypoint);
+    return {
+      x: x + (dx / distanceToWaypoint) * distance,
+      y: y + (dy / distanceToWaypoint) * distance,
+    };
+  }
+
+  /**
+   * Vehicle-specific path preview. Grid/A* paths are deliberately kept as
+   * navigation data, while the car follows a look-ahead point between/along
+   * those waypoints. This removes the stop-turn-go look of point chasing.
+   * It also measures the next corner so speed control can anticipate it.
+   */
+  _navCarPathPreview(path, index, x, y, lookaheadDistance, cornerLookahead) {
+    if (!Array.isArray(path) || path.length === 0) {
+      return { x, y, cornerSeverity: 0, cornerDistance: Infinity, tangentX: 0, tangentY: -1 };
+    }
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    let i = Math.max(0, Math.min(path.length - 1, Number(index) || 0));
+    let px = x, py = y;
+    let remaining = Math.max(1, lookaheadDistance);
+    let aimX = path[i]?.x ?? x;
+    let aimY = path[i]?.y ?? y;
+    let tangentX = 0, tangentY = -1;
+    let travelled = 0;
+    let cornerSeverity = 0;
+    let cornerDistance = Infinity;
+    let cornerIndex = -1;
+
+    while (i < path.length) {
+      const wx = Number(path[i].x) || 0;
+      const wy = Number(path[i].y) || 0;
+      const dx = wx - px, dy = wy - py;
+      const seg = Math.hypot(dx, dy);
+      if (seg > 1e-5) {
+        const ux = dx / seg, uy = dy / seg;
+        tangentX = ux; tangentY = uy;
+        if (seg >= remaining) {
+          aimX = px + ux * remaining;
+          aimY = py + uy * remaining;
+          break;
+        }
+        remaining -= seg;
+        travelled += seg;
+      }
+
+      // At this waypoint, compare the incoming direction with the next
+      // outgoing segment. A large change means a driver should start
+      // braking before the corner rather than after it.
+      if (i < path.length - 1 && tangentX !== 0 || tangentY !== 0) {
+        const nx = (Number(path[i + 1].x) || 0) - wx;
+        const ny = (Number(path[i + 1].y) || 0) - wy;
+        const nlen = Math.hypot(nx, ny);
+        if (nlen > 1e-5) {
+          const nuX = nx / nlen, nuY = ny / nlen;
+          const dot = Math.max(-1, Math.min(1, tangentX * nuX + tangentY * nuY));
+          const turn = Math.acos(dot);
+          const previewFactor = 1 - clamp01(travelled / Math.max(1, cornerLookahead));
+          cornerSeverity = Math.max(cornerSeverity, (turn / Math.PI) * previewFactor);
+          if (cornerDistance === Infinity) {
+            cornerDistance = travelled;
+            cornerIndex = i;
+          }
+        }
+      }
+
+      px = wx; py = wy; i++;
+      aimX = px; aimY = py;
+      if (remaining <= 1e-4 || i >= path.length) break;
+    }
+
+    // Do NOT blend a point from before a corner with a point after the
+    // corner. That interpolation creates a brand-new diagonal point that
+    // was never on the navigation route, which can make a car cut across
+    // an unwalkable/forbidden area (for example, leaving a road and
+    // shortcutting over the Ground at a 90-degree road bend). The near
+    // sample above is already a look-ahead point measured along the actual
+    // path polyline, so it is both smooth enough for steering and guaranteed
+    // to remain on the path segment selected by navigation.
+    // Bend the route tangent toward the outgoing segment while approaching
+    // the next corner. This is intentionally local: once the car is past the
+    // corner the new segment becomes authoritative, and before the corner the
+    // bend begins gradually so steering never snaps.
+    let tangentBlend = 0;
+    if (cornerIndex >= 0 && cornerIndex < path.length - 1 && cornerDistance !== Infinity) {
+      const turnWindow = Math.max(18, Math.min(72, Number(cornerLookahead) || 70));
+      tangentBlend = 1 - clamp01(cornerDistance / turnWindow);
+      tangentBlend = tangentBlend * tangentBlend * (3 - 2 * tangentBlend);
+      // Tight corners are kept much more conservative than gentle curves.
+      // A near-180-degree reversal should never be rounded aggressively,
+      // while small bends can begin steering earlier.
+      const wx = Number(path[cornerIndex]?.x) || aimX;
+      const wy = Number(path[cornerIndex]?.y) || aimY;
+      const nx = (Number(path[cornerIndex + 1]?.x) || wx) - wx;
+      const ny = (Number(path[cornerIndex + 1]?.y) || wy) - wy;
+      const nlen = Math.hypot(nx, ny);
+      if (nlen > 1e-5 && tangentBlend > 0) {
+        const nextX = nx / nlen, nextY = ny / nlen;
+        const dot = Math.max(-1, Math.min(1, tangentX * nextX + tangentY * nextY));
+        const turnAngle = Math.acos(dot);
+        const gentleFactor = Math.max(0, Math.min(1, 1 - turnAngle / (Math.PI * 0.72)));
+        tangentBlend *= gentleFactor;
+        tangentX = tangentX * (1 - tangentBlend) + nextX * tangentBlend;
+        tangentY = tangentY * (1 - tangentBlend) + nextY * tangentBlend;
+        const tlen = Math.hypot(tangentX, tangentY);
+        if (tlen > 1e-5) { tangentX /= tlen; tangentY /= tlen; }
+      }
+    }
+    return { x: aimX, y: aimY, cornerSeverity, cornerDistance, tangentX, tangentY, tangentBlend };
+  }
+
+  /** Local short-range obstacle scanner for cars. Nav baking handles the
+   * global route; these shape-agnostic rays handle moving/late obstacles
+   * that are not represented in the last Nav bake. */
+  _navCarScanObstacles(transform, navAgent, speed, targetX, targetY) {
+    const forwardAngle = (transform.rotation * Math.PI) / 180;
+    const fx = Math.sin(forwardAngle), fy = -Math.cos(forwardAngle);
+    const rx = Math.cos(forwardAngle), ry = Math.sin(forwardAngle);
+    const range = Math.max(48, Number(navAgent?.vehicleObstacleLookahead) || 120);
+    const width = Math.max(6, Number(navAgent?.vehicleObstacleWidth) || 28);
+    const cast = (dx, dy, length) => {
+      if (!this._scriptApi || typeof this._scriptApi._raycast !== 'function') return null;
+      return this._scriptApi._raycast(transform.x, transform.y,
+        transform.x + dx * length, transform.y + dy * length,
+        { exclude: [this._entity] });
+    };
+
+    const samples = [
+      { lateral: 0, x: fx, y: fy },
+      { lateral: -width, x: fx * 0.98 - rx * 0.20, y: fy * 0.98 - ry * 0.20 },
+      { lateral: width, x: fx * 0.98 + rx * 0.20, y: fy * 0.98 + ry * 0.20 },
+    ];
+    let centerHit = null, leftClear = range, rightClear = range;
+    for (const sample of samples) {
+      const hit = cast(sample.x, sample.y, range);
+      const d = hit && Number.isFinite(hit.distance) ? hit.distance : range;
+      if (sample.lateral === 0) centerHit = hit ? { ...hit, distance: d } : null;
+      else if (sample.lateral < 0) leftClear = Math.min(leftClear, d);
+      else rightClear = Math.min(rightClear, d);
+    }
+
+    // If the target itself is substantially off to one side, preserve a
+    // little bias so obstacle avoidance does not over-correct away from the
+    // actual route.
+    const targetDX = targetX - transform.x, targetDY = targetY - transform.y;
+    const targetSide = fx * targetDY - fy * targetDX;
+    let steer = 0;
+    let brake = 0;
+    let blocked = false;
+    if (centerHit) {
+      const normalized = Math.max(0, Math.min(1, 1 - centerHit.distance / range));
+      const speedFactor = Math.max(0.35, Math.min(1.2, (Math.abs(speed) + 40) / 180));
+      brake = normalized * speedFactor;
+      blocked = centerHit.distance < Math.max(45, Math.abs(speed) * 0.8);
+      // Choose the side with more room. Tiny target-side bias breaks exact
+      // symmetry without causing frame-to-frame left/right chatter.
+      const clearanceBias = rightClear - leftClear;
+      steer = clearanceBias > 4 ? 1 : clearanceBias < -4 ? -1 : (targetSide >= 0 ? 1 : -1) * 0.15;
+      steer *= normalized;
+    } else {
+      const sidePressure = Math.max(0, (range - leftClear) / range) - Math.max(0, (range - rightClear) / range);
+      steer += sidePressure * 0.55;
+    }
+    return { centerHit, leftClear, rightClear, steer, brake, blocked, range };
+  }
+
+  /** Controller smoothing is deliberately based on the requested steering
+   * signal, not by directly rewriting transform.rotation. That keeps manual
+   * driving untouched and makes Nav cars feel like they have steering inertia. */
+  _navCarSmoothSignal(previous, next, dt, response) {
+    const a = 1 - Math.exp(-Math.max(0.1, response) * Math.max(0, dt));
+    return previous + (next - previous) * a;
+  }
+
   _applyNavAvoidance(navAgent, agentRadius, dirX, dirY) {
     if (!navAgent || !navAgent.avoidanceEnabled) return { x: dirX, y: dirY };
 
@@ -1222,6 +2129,14 @@ export class ScriptAPI {
     this._navFindPathFn = null;
     /** Set by createGame to enable nav.isWalkable(x,y) -> boolean. */
     this._navIsWalkableFn = null;
+    /** Set by createGame: per-agent (radius+area) walkability check used
+     *  by EntityContext._escapeDisallowedArea() to tell "this agent's
+     *  own spot is illegal for its radius/area" apart from a merely
+     *  unreachable goal — see that method's doc comment. */
+    this._navIsWalkableForAgentFn = null;
+    /** Set by createGame: nearest point a given (radius, area) agent
+     *  could legally stand near (x, y) — backs the same recovery. */
+    this._navNearestWalkableFn = null;
     /** Set by createGame to enable nav.bake() -> {walkable,blocked}|null.
      *  Exposed to scripts mainly for a procedurally-generated level that
      *  needs to re-bake after spawning its own obstacles at runtime —
@@ -1285,17 +2200,14 @@ export class ScriptAPI {
      * Used by both mouse and touch paths.
      */
     function toCoords(clientX, clientY) {
-      var rect = canvas.getBoundingClientRect();
-      var scaleX = canvas.width / rect.width;
-      var scaleY = canvas.height / rect.height;
-      var screenX = (clientX - rect.left) * scaleX;
-      var screenY = (clientY - rect.top) * scaleY;
-      var world = { x: screenX, y: screenY };
-      if (renderSystem && renderSystem.worldContainer && renderSystem.worldContainer.toLocal) {
-        var local = renderSystem.worldContainer.toLocal({ x: screenX, y: screenY });
-        world = { x: local.x, y: local.y };
-      }
-      return { screenX: screenX, screenY: screenY, worldX: world.x, worldY: world.y };
+      var c = clientToLocal(
+        clientX,
+        clientY,
+        canvas,
+        renderSystem && renderSystem.pixiApp,
+        renderSystem && renderSystem.worldContainer
+      );
+      return { screenX: c.screenX, screenY: c.screenY, worldX: c.x, worldY: c.y };
     }
 
     function isTouchPointer(e) {
@@ -1315,8 +2227,17 @@ export class ScriptAPI {
     canvas.addEventListener("pointerleave", function (e) {
       if (!isTouchPointer(e)) self._mouse.over = false;
     });
+    canvas.addEventListener("pointerover", function (e) {
+      if (!isTouchPointer(e)) self._mouse.over = true;
+    });
     canvas.addEventListener("pointerdown", function (e) {
       if (isTouchPointer(e)) return;
+      var c = toCoords(e.clientX, e.clientY);
+      self._mouse.x = c.worldX;
+      self._mouse.y = c.worldY;
+      self._mouse.screenX = c.screenX;
+      self._mouse.screenY = c.screenY;
+      self._mouse.over = true;
       self._mouse.buttonsDown.add(e.button);
       self._mouse.buttonsPressed.add(e.button);
     });
@@ -1341,9 +2262,7 @@ export class ScriptAPI {
     // Android WebViews expose Touch Events, newer ones expose Pointer Events,
     // and some hybrid devices expose both. Native input is the source of
     // truth here; swipe and pinch are derived from the live touch map below.
-    canvas.style.touchAction = "none";
-    canvas.style.userSelect = "none";
-    canvas.style.webkitUserSelect = "none";
+    prepareGameCanvas(canvas);
 
     function touchStart(id, clientX, clientY) {
       var c = toCoords(clientX, clientY);
@@ -2009,7 +2928,8 @@ export class ScriptAPI {
     opts = opts || {};
     var radius = Number.isFinite(opts.radius) ? Math.max(0, opts.radius) : 0;
     var area = Number.isFinite(opts.area) ? (opts.area & 0xffff) : 0xffff;
-    var path = this._navFindPathFn ? this._navFindPathFn(x1, y1, x2, y2, radius, area) : null;
+    var areaCosts = Array.isArray(opts.areaCosts) ? opts.areaCosts : null;
+    var path = this._navFindPathFn ? this._navFindPathFn(x1, y1, x2, y2, radius, area, areaCosts) : null;
 
     if (opts.debug && path && path.length > 1) {
       for (var i = 0; i < path.length - 1; i++) {
@@ -2022,6 +2942,22 @@ export class ScriptAPI {
     }
 
     return path;
+  }
+
+  /**
+   * Finds the nearest point THIS agent (given radius+area) could
+   * actually stand, expanding outward from (x, y). Backs the "agent is
+   * standing somewhere its own area mask/radius disallows" recovery in
+   * EntityContext.navMoveToward()/navDriveToward() below — see
+   * _escapeDisallowedArea()'s doc comment for the full strategy this
+   * feeds into. Thin wrapper over _navNearestWalkableFn (wired to
+   * NavWorldSystem.nearestWalkablePointForAgent by createGame — see
+   * runtime/index.js), same pattern as _findNavPath/_navIsWalkableFn
+   * above.
+   * @returns {{x:number,y:number}|null}
+   */
+  _findNearestWalkable(x, y, radius, area, areaCosts) {
+    return this._navNearestWalkableFn ? this._navNearestWalkableFn(x, y, radius, area, areaCosts) : null;
   }
 
   /**

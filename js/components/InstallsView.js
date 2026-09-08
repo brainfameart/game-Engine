@@ -18,7 +18,7 @@ window.ZenInstallsView = {
         const rows = this.installs.map(inst => el('div', { class: 'project-row', style: 'cursor:default;' }, [
             el('div', { class: 'project-thumb' }, [el('span', { html: '<svg data-lucide="box"></svg>' })]),
             el('div', { class: 'project-meta' }, [
-                el('div', { class: 'project-name' }, [`ZenEngine ${inst.version}`]),
+                el('div', { class: 'project-name' }, [`Vaelis ${inst.version}`]),
                 el('div', { class: 'project-path' }, [inst.active ? 'Active version' : 'Installed'])
             ]),
             el('div', { class: 'project-tags' }, [

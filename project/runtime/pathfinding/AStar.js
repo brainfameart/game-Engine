@@ -117,7 +117,7 @@ function bumpSearchId(layer) {
   return layer.searchId;
 }
 
-function nearestWalkable(rt, layer, col, row, maxRing = 4) {
+export function nearestWalkable(rt, layer, col, row, maxRing = 4) {
   if (isWalkable(rt, layer, col, row)) return { col, row };
   for (let ring = 1; ring <= maxRing; ring++) {
     for (let dc = -ring; dc <= ring; dc++) {
@@ -162,10 +162,17 @@ function cacheKey(start, goal, diagonal) {
  *   whose area bit isn't in this mask, default 0xffff (every area
  *   allowed). Per-area COST (a soft preference, e.g. "prefer roads over
  *   mud" — see NavWorld2D.areaCosts) is applied automatically to every
- *   allowed cell and needs no separate parameter here.
+ *   allowed cell and needs no separate parameter here, UNLESS the agent
+ *   supplies its own override — see the next parameter.
+ * @param {number[]|null} [agentAreaCosts] optional per-agent cost
+ *   override (NavAgent2D.areaCosts) — index-aligned with the same 16
+ *   area slots as areaMask/NavWorld2D.areaCosts. A finite entry > 0 at
+ *   a slot wins over the world's cost for that slot for THIS search
+ *   only; null (default) means "use the world's cost for every area",
+ *   so existing callers are unaffected. See getNavAreaCost's header.
  */
-export function findGridPath(navWorld, startCol, startRow, goalCol, goalRow, radius = 0, areaMask = 0xffff) {
-  const layer = getAgentNavLayer(navWorld, radius, areaMask);
+export function findGridPath(navWorld, startCol, startRow, goalCol, goalRow, radius = 0, areaMask = 0xffff, agentAreaCosts = null) {
+  const layer = getAgentNavLayer(navWorld, radius, areaMask, agentAreaCosts);
   // rt-shaped cols/rows come from the layer's own dimensions, which
   // always match the current bake (getAgentNavLayer derives from
   // getNavWorldRuntime, which rebuilds on any bounds/cellSize change).
@@ -182,12 +189,18 @@ export function findGridPath(navWorld, startCol, startRow, goalCol, goalRow, rad
   // The minimum cost among areas this agent is actually allowed to enter is
   // the safest global lower bound for the weighted A* heuristic. Include
   // only allowed area slots so an excluded cheap area cannot incorrectly
-  // make the heuristic too small/large for this agent.
+  // make the heuristic too small/large for this agent. Checks the
+  // agent's own override FIRST per slot (same precedence as
+  // getNavAreaCost), falling back to the world's cost for any slot the
+  // agent hasn't overridden, so the heuristic never assumes a cheaper
+  // cost than the search will actually use.
   let minStepCost = Infinity;
   const allowedMask = areaMask & 0xffff;
+  const hasAgentCosts = Array.isArray(agentAreaCosts);
   for (let areaIndex = 0; areaIndex < 16; areaIndex++) {
     if ((allowedMask & (1 << areaIndex)) === 0) continue;
-    const c = Number(navWorld.areaCosts?.[areaIndex]);
+    let c = hasAgentCosts ? Number(agentAreaCosts[areaIndex]) : NaN;
+    if (!Number.isFinite(c) || c <= 0) c = Number(navWorld.areaCosts?.[areaIndex]);
     if (Number.isFinite(c) && c > 0) minStepCost = Math.min(minStepCost, c);
   }
   if (!Number.isFinite(minStepCost)) minStepCost = 1;
@@ -278,22 +291,23 @@ export function simplifyGridPath(path) {
 }
 
 /**
- * @param {import('../components/NavWorld2D.js').NavWorld2D} navWorld
- * @param {number} radius agent clearance — see findGridPath
- * @param {number} [areaMask] allowed area bitmask — see findGridPath.
- *   MUST match the mask the path itself was found with, or this could
- *   report line-of-sight across a cell the agent isn't actually allowed
- *   to enter.
+ * Returns the weighted traversal cost of a straight grid segment, or
+ * Infinity when the segment is not walkable. This deliberately uses the
+ * SAME supercover traversal as hasGridLineOfSight() so path smoothing cannot
+ * accidentally erase a cheaper detour around a high-cost Nav Area.
+ *
+ * Cost is charged to the destination cell, matching A* in findGridPath():
+ *   stepCost * layer.cost[destination]
  */
-export function hasGridLineOfSight(navWorld, startCol, startRow, endCol, endRow, radius = 0, areaMask = 0xffff) {
-  const layer = getAgentNavLayer(navWorld, radius, areaMask);
-  const rt = { cols: Math.max(1, Math.ceil(navWorld.boundsWidth / navWorld.cellSize)) };
+function gridSegmentCost(layer, rt, startCol, startRow, endCol, endRow) {
   const isWalkableIdx = (col, row) => {
     if (col < 0 || row < 0 || col >= rt.cols) return false;
     const idx = row * rt.cols + col;
     return idx >= 0 && idx < layer.walkable.length && layer.walkable[idx] === 1;
   };
-  if (!isWalkableIdx(startCol, startRow) || !isWalkableIdx(endCol, endRow)) return false;
+  const cellCost = (col, row) => layer.cost[row * rt.cols + col];
+
+  if (!isWalkableIdx(startCol, startRow) || !isWalkableIdx(endCol, endRow)) return Infinity;
 
   const dx = endCol - startCol;
   const dy = endRow - startRow;
@@ -305,43 +319,74 @@ export function hasGridLineOfSight(navWorld, startCol, startRow, endCol, endRow,
   let row = startRow;
   let progressedCol = 0;
   let progressedRow = 0;
+  let total = 0;
 
   if (countRow === 0) {
     while (progressedCol < countCol) {
       col += stepCol;
       progressedCol++;
-      if (!isWalkableIdx(col, row)) return false;
+      if (!isWalkableIdx(col, row)) return Infinity;
+      total += cellCost(col, row);
     }
-    return true;
+    return total;
   }
   if (countCol === 0) {
     while (progressedRow < countRow) {
       row += stepRow;
       progressedRow++;
-      if (!isWalkableIdx(col, row)) return false;
+      if (!isWalkableIdx(col, row)) return Infinity;
+      total += cellCost(col, row);
     }
-    return true;
+    return total;
   }
 
   while (progressedCol < countCol || progressedRow < countRow) {
     const crossCol = (1 + 2 * progressedCol) * countRow;
     const crossRow = (1 + 2 * progressedRow) * countCol;
     if (crossCol === crossRow) {
-      if (!isWalkableIdx(col + stepCol, row) || !isWalkableIdx(col, row + stepRow)) return false;
+      // Same no-corner-cut rule used by A* and hasGridLineOfSight.
+      if (!isWalkableIdx(col + stepCol, row) || !isWalkableIdx(col, row + stepRow)) return Infinity;
       col += stepCol;
       row += stepRow;
       progressedCol++;
       progressedRow++;
+      if (!isWalkableIdx(col, row)) return Infinity;
+      total += Math.SQRT2 * cellCost(col, row);
     } else if (crossCol < crossRow) {
       col += stepCol;
       progressedCol++;
+      if (!isWalkableIdx(col, row)) return Infinity;
+      total += cellCost(col, row);
     } else {
       row += stepRow;
       progressedRow++;
+      if (!isWalkableIdx(col, row)) return Infinity;
+      total += cellCost(col, row);
     }
-    if (!isWalkableIdx(col, row)) return false;
   }
-  return true;
+  return total;
+}
+
+function gridPathCost(path, fromIndex, toIndex, layer, rt) {
+  let total = 0;
+  for (let i = fromIndex + 1; i <= toIndex; i++) {
+    const previous = path[i - 1];
+    const current = path[i];
+    const dc = current.col - previous.col;
+    const dr = current.row - previous.row;
+    if (Math.abs(dc) > 1 || Math.abs(dr) > 1 || (dc === 0 && dr === 0)) return Infinity;
+    const step = dc !== 0 && dr !== 0 ? Math.SQRT2 : 1;
+    const idx = current.row * rt.cols + current.col;
+    if (idx < 0 || idx >= layer.cost.length || layer.walkable[idx] !== 1) return Infinity;
+    total += step * layer.cost[idx];
+  }
+  return total;
+}
+
+export function hasGridLineOfSight(navWorld, startCol, startRow, endCol, endRow, radius = 0, areaMask = 0xffff, agentAreaCosts = null) {
+  const layer = getAgentNavLayer(navWorld, radius, areaMask, agentAreaCosts);
+  const rt = { cols: Math.max(1, Math.ceil(navWorld.boundsWidth / navWorld.cellSize)) };
+  return Number.isFinite(gridSegmentCost(layer, rt, startCol, startRow, endCol, endRow));
 }
 
 /**
@@ -349,23 +394,36 @@ export function hasGridLineOfSight(navWorld, startCol, startRow, endCol, endRow,
  * @param {number} radius agent clearance — see findGridPath
  * @param {number} [areaMask] allowed area bitmask — see findGridPath.
  *   Passed straight through to hasGridLineOfSight's own mask check.
+ * @param {number[]|null} [agentAreaCosts] optional per-agent cost
+ *   override — see findGridPath. Passed straight through so smoothing
+ *   reads from the same cached layer the path was found against.
  */
-export function smoothGridPath(navWorld, path, radius = 0, areaMask = 0xffff) {
+export function smoothGridPath(navWorld, path, radius = 0, areaMask = 0xffff, agentAreaCosts = null) {
   if (path.length <= 2) return path.slice();
+  const layer = getAgentNavLayer(navWorld, radius, areaMask, agentAreaCosts);
+  const rt = { cols: Math.max(1, Math.ceil(navWorld.boundsWidth / navWorld.cellSize)) };
   const out = [path[0]];
   let anchor = 0;
   const last = path.length - 1;
+
   while (anchor < last) {
     let next = last;
-    while (next > anchor + 1 && !hasGridLineOfSight(
-      navWorld,
-      path[anchor].col,
-      path[anchor].row,
-      path[next].col,
-      path[next].row,
-      radius,
-      areaMask
-    )) next--;
+    while (next > anchor + 1) {
+      const directCost = gridSegmentCost(
+        layer, rt,
+        path[anchor].col, path[anchor].row,
+        path[next].col, path[next].row
+      );
+      if (Number.isFinite(directCost)) {
+        const originalCost = gridPathCost(path, anchor, next, layer, rt);
+        // Never smooth away a cheaper weighted route. Before this fix,
+        // smoothing only checked geometry, so a direct line through an
+        // expensive Road/Mud area could replace the A* detour and make
+        // area costs appear to be completely ignored.
+        if (directCost <= originalCost + 1e-6) break;
+      }
+      next--;
+    }
     out.push(path[next]);
     anchor = next;
   }

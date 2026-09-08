@@ -72,11 +72,14 @@
 import { System } from "../core/System.js";
 import { TRANSFORM } from "../components/Transform.js";
 import { TEXT_INPUT } from "../components/TextInput.js";
+import { clientToLocal } from "../core/MobileViewport.js";
 
 export class TextInputSystem extends System {
-  constructor(canvas) {
+  constructor(canvas, pixiApp = null, uiContainer = null) {
     super();
     this.canvas = canvas;
+    this.pixiApp = pixiApp;
+    this.uiContainer = uiContainer;
     /** @type {Map<string, HTMLInputElement>} entityId -> real DOM input */
     this._inputs = new Map();
     /** entity ids whose Enter keydown fired since the last time THIS
@@ -95,6 +98,7 @@ export class TextInputSystem extends System {
 
   update(world, dt) {
     const entities = world.query(TRANSFORM, TEXT_INPUT);
+    this._currentTextEntities = entities;
     const seen = new Set();
     // PERFORMANCE: getBoundingClientRect() forces the browser to run a
     // synchronous layout reflow — it can't just read a cached number,
@@ -158,6 +162,10 @@ export class TextInputSystem extends System {
             this._pendingClear.add(entity.id);
           }
         });
+        // A transparent DOM input has no visible hit target of its own.
+        // Mobile browsers only open the software keyboard when focus is
+        // initiated from a real user gesture, so TextInputSystem owns the
+        // tap-to-focus bridge here instead of relying on a later script call.
 
         this._inputs.set(entity.id, el);
       }
@@ -172,14 +180,26 @@ export class TextInputSystem extends System {
       el.maxLength = textInput.maxLength;
       el.placeholder = textInput.placeholder;
 
-      // Position/size to exactly cover the visible PIXI-drawn box.
-      // TextInput is always screen-space (see the component's file
-      // header) — Transform.x/y are already raw screen pixels, same
-      // convention TextRenderer's screenSpace:true mode uses.
-      el.style.left = (rect.left + transform.x) + "px";
-      el.style.top = (rect.top + transform.y) + "px";
-      el.style.width = textInput.width + "px";
-      el.style.height = textInput.height + "px";
+      // Position/size to exactly cover the visible PIXI-drawn box. UI
+      // Transform.x/y are reference-resolution coordinates, then
+      // uiContainer applies the device-fit scale/offset. Use PIXI's own
+      // transform rather than reimplementing that math in DOM pixels.
+      let left = rect.left + transform.x;
+      let top = rect.top + transform.y;
+      let width = textInput.width;
+      let height = textInput.height;
+      if (this.uiContainer && typeof this.uiContainer.toGlobal === "function") {
+        const p0 = this.uiContainer.toGlobal({ x: transform.x, y: transform.y });
+        const p1 = this.uiContainer.toGlobal({ x: transform.x + textInput.width, y: transform.y + textInput.height });
+        left = rect.left + p0.x;
+        top = rect.top + p0.y;
+        width = Math.abs(p1.x - p0.x);
+        height = Math.abs(p1.y - p0.y);
+      }
+      el.style.left = left + "px";
+      el.style.top = top + "px";
+      el.style.width = Math.max(1, width) + "px";
+      el.style.height = Math.max(1, height) + "px";
     }
 
     // Remove real inputs for entities that no longer exist / lost the
@@ -192,6 +212,39 @@ export class TextInputSystem extends System {
         this._pendingClear.delete(entityId);
         this._readyToClear.delete(entityId);
       }
+    }
+
+    // Keep the invisible native input exactly where the visible PIXI box is,
+    // and make it focusable from a direct touch/click. The actual event
+    // listener is installed once per canvas so repeated update() calls never
+    // accumulate handlers.
+    if (!this._inputPointerHandler && this.canvas && typeof this.canvas.addEventListener === "function") {
+      this._inputPointerHandler = (e) => {
+        if (e.pointerType === "mouse" && e.button !== 0) return;
+        const rectNow = this.canvas.getBoundingClientRect();
+        const p = clientToLocal(
+          e.clientX, e.clientY, this.canvas, this.pixiApp, this.uiContainer
+        );
+        let focused = false;
+        for (const entity of this._currentTextEntities || []) {
+          const transform = entity.getComponent(TRANSFORM);
+          const input = entity.getComponent(TEXT_INPUT);
+          if (p.x >= transform.x && p.x <= transform.x + input.width &&
+              p.y >= transform.y && p.y <= transform.y + input.height) {
+            const el = this._inputs.get(entity.id);
+            if (el) {
+              el.focus({ preventScroll: true });
+              focused = true;
+              break;
+            }
+          }
+        }
+        if (!focused && this._inputs.size) {
+          const active = document.activeElement;
+          if (active && this._inputsHasElement(active)) active.blur();
+        }
+      };
+      this.canvas.addEventListener("pointerdown", this._inputPointerHandler, { passive: true });
     }
 
     // Promote anything the keydown handler marked pending SINCE this
@@ -214,8 +267,18 @@ export class TextInputSystem extends System {
     this._pendingClear.clear();
   }
 
+  _inputsHasElement(el) {
+    for (const input of this._inputs.values()) if (input === el) return true;
+    return false;
+  }
+
   /** Called on game teardown — removes every real input this system created. */
   destroy() {
+    if (this._inputPointerHandler && this.canvas) {
+      this.canvas.removeEventListener("pointerdown", this._inputPointerHandler);
+      this._inputPointerHandler = null;
+    }
+    this._currentTextEntities = [];
     for (const el of this._inputs.values()) el.remove();
     this._inputs.clear();
     this._pendingClear.clear();

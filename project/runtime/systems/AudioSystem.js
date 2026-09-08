@@ -65,6 +65,26 @@ export class AudioSystem {
     // the clip's length. A pool lets every overlapping call ring out
     // independently, exactly like Unity's AudioSource.PlayOneShot.
     this._oneShotVoices = new Map();
+    this._userInteracted = false;
+    this._pendingAutoplay = new Set();
+    this._gestureHandler = null;
+  }
+
+  /**
+   * Mobile browsers commonly block HTMLAudio playback until a real user
+   * gesture occurs. Record that gesture on the game surface so autoplay
+   * sources that were blocked at boot can be retried after the first tap.
+   */
+  attachInput(canvas) {
+    if (!canvas || this._gestureHandler) return;
+    this._gestureCanvas = canvas;
+    this._gestureHandler = () => {
+      this._userInteracted = true;
+      for (const id of this._pendingAutoplay) this._prevAutoplay.set(id, false);
+      this._pendingAutoplay.clear();
+    };
+    canvas.addEventListener("pointerdown", this._gestureHandler, { passive: true });
+    canvas.addEventListener("touchstart", this._gestureHandler, { passive: true });
   }
 
   /**
@@ -166,6 +186,7 @@ export class AudioSystem {
       // never merely because autoplay-is-true-and-paused-is-true.
       const prevAutoplay = this._prevAutoplay.get(entity.id);
       const justEnabled = !!source.autoplay && prevAutoplay !== true;
+      const retryAfterGesture = this._userInteracted && this._pendingAutoplay.has(entity.id) && source.autoplay;
       // "Ready" combines two signals: the canplaythrough/loadeddata
       // events set in _ensureElement (fires reliably for network-loaded
       // audio) OR a direct readyState >= 2 (HAVE_CURRENT_DATA) check
@@ -197,15 +218,18 @@ export class AudioSystem {
       }
       this._pruneOneShots(entity.id);
 
-      if (justEnabled && ready) {
+      const shouldStart = (justEnabled || retryAfterGesture) && ready && el.paused;
+      if (shouldStart) {
         el.currentTime = 0;
-        el.play().catch(() => {
-          // Autoplay can be blocked until a user gesture happens
-          // somewhere on the page (browser policy) — this is expected
-          // right after Play mode starts from a toolbar click, so
-          // silently retry next frame rather than logging noise.
+        el.play().then(() => {
+          this._pendingAutoplay.delete(entity.id);
+        }).catch(() => {
+          // Keep the request pending. A phone/WebView may require the first
+          // real user gesture before media playback is permitted.
+          this._pendingAutoplay.add(entity.id);
+          this._prevAutoplay.set(entity.id, false);
         });
-      } else if (justEnabled) {
+      } else if (justEnabled || retryAfterGesture) {
         // Not ready yet (still loading) — keep retrying the
         // just-enabled check next frame instead of dropping it, by not
         // recording autoplay as "seen" until it actually starts.
@@ -213,8 +237,16 @@ export class AudioSystem {
         el.pause();
       }
       if (ready || !source.autoplay) {
-        this._prevAutoplay.set(entity.id, !!source.autoplay);
+        // A failed autoplay attempt deliberately stays false so the
+        // post-gesture retry path can run. Successful playback clears the
+        // pending marker above and records the normal true state here.
+        if (source.autoplay && this._pendingAutoplay.has(entity.id)) {
+          this._prevAutoplay.set(entity.id, false);
+        } else {
+          this._prevAutoplay.set(entity.id, !!source.autoplay);
+        }
       }
+
     }
 
     // Stop + release elements for entities that no longer have an
@@ -346,6 +378,18 @@ export class AudioSystem {
     this._canPlay.clear();
     this._lastReplayToken.clear();
     this._oneShotVoices.clear();
+    this._pendingAutoplay.clear();
+    if (this._gestureHandler) {
+      // The listener is attached to the game canvas, which is owned by the
+      // host. Keep a reference so teardown can remove it cleanly.
+      // `attachInput` stores the target for this purpose.
+      if (this._gestureCanvas) {
+        this._gestureCanvas.removeEventListener("pointerdown", this._gestureHandler);
+        this._gestureCanvas.removeEventListener("touchstart", this._gestureHandler);
+      }
+      this._gestureHandler = null;
+      this._gestureCanvas = null;
+    }
   }
 }
 

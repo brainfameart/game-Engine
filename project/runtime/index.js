@@ -157,7 +157,7 @@ export function createGame({ pixiApp, followMainCamera = false, gameId }) {
   // lagging one frame behind.
   world.addSystem(new AnimationSystem());
   world.addSystem(new SpeechBubbleSystem());
-  const textInputSystem = new TextInputSystem(pixiApp.view);
+  const textInputSystem = new TextInputSystem(pixiApp.view, pixiApp, uiContainer);
   world.addSystem(textInputSystem);
   // JoystickSystem needs its own real pointer/touch listeners attached
   // to the actual canvas (see that file's header for why it tracks
@@ -168,8 +168,8 @@ export function createGame({ pixiApp, followMainCamera = false, gameId }) {
   // available (unlike renderSystem, which attachPointerInput also
   // needs and isn't constructed until a few lines down) — so this one
   // can attach immediately rather than waiting.
-  const joystickSystem = new JoystickSystem(pixiApp.view);
-  joystickSystem.attachInput(pixiApp.view);
+  const joystickSystem = new JoystickSystem(pixiApp.view, pixiApp);
+  joystickSystem.attachInput(pixiApp.view, uiContainer);
   world.addSystem(joystickSystem);
   // NOTE: RenderSystem/TilemapSystem/NavWorldSystem/LightingSystem/
   // CameraRenderSystem are constructed here (so gameContentContainer
@@ -218,6 +218,7 @@ export function createGame({ pixiApp, followMainCamera = false, gameId }) {
   // the system order relative to rendering/lighting doesn't matter —
   // added here for clarity only.
   const audioSystem = new AudioSystem();
+  audioSystem.attachInput(pixiApp.view);
   world.addSystem(audioSystem);
 
   // AudioListenerSystem also doesn't touch gameContentContainer (pure
@@ -303,16 +304,44 @@ export function createGame({ pixiApp, followMainCamera = false, gameId }) {
   // via this.navMoveToward) are forwarded straight through to
   // NavWorldSystem.findPath, which applies the per-agent-radius erosion
   // layer AND the area mask — see components/NavWorld2D.js's
-  // getAgentNavLayer.
-  scriptApi._navFindPathFn = function (x1, y1, x2, y2, radius, area) {
+  // getAgentNavLayer. `areaCosts` is the calling NavAgent2D's own
+  // per-area cost override (see NavAgent2D.areaCosts) — undefined/null
+  // when there's no calling agent (a raw nav.findPath() script call) or
+  // the agent has no override set, in which case NavWorldSystem.findPath
+  // falls back to the shared NavWorld2D costs exactly as before this
+  // parameter existed.
+  scriptApi._navFindPathFn = function (x1, y1, x2, y2, radius, area, areaCosts) {
     const navWorldEntity = navWorldSystem._firstNavWorld();
     if (!navWorldEntity) return null;
-    return navWorldSystem.findPath(navWorldEntity, x1, y1, x2, y2, radius, area);
+    return navWorldSystem.findPath(navWorldEntity, x1, y1, x2, y2, radius, area, areaCosts);
   };
   scriptApi._navIsWalkableFn = function (x, y) {
     const navWorldEntity = navWorldSystem._firstNavWorld();
     if (!navWorldEntity) return false;
     return navWorldSystem.isWalkable(navWorldEntity, x, y);
+  };
+  // Per-agent (radius+area) walkability check — used by
+  // EntityContext._escapeDisallowedArea() (see ScriptAPI.js) to tell
+  // "this agent's own current spot is illegal for ITS radius/area" apart
+  // from "the goal is unreachable but I'm standing somewhere fine" —
+  // nav.isWalkable() above only answers the base-layer (radius 0, every
+  // area allowed) question, which isn't the same thing.
+  scriptApi._navIsWalkableForAgentFn = function (x, y, radius, area, areaCosts) {
+    const navWorldEntity = navWorldSystem._firstNavWorld();
+    if (!navWorldEntity) return true; // no NavWorld2D baked yet — don't
+    // treat "no data" as "agent is illegally placed"; that would trigger
+    // escape behavior in every scene that simply hasn't baked yet.
+    return navWorldSystem.isWalkableForAgent(navWorldEntity, x, y, radius, area, areaCosts);
+  };
+  // Backs the "stuck inside a disallowed area" recovery in
+  // navMoveToward()/navDriveToward() (see ScriptAPI.js) — finds the
+  // nearest point this specific agent (its radius+area) COULD stand,
+  // so a script can nudge it back onto walkable ground instead of
+  // freezing in place forever inside a zone its own area mask excludes.
+  scriptApi._navNearestWalkableFn = function (x, y, radius, area, areaCosts) {
+    const navWorldEntity = navWorldSystem._firstNavWorld();
+    if (!navWorldEntity) return null;
+    return navWorldSystem.nearestWalkablePointForAgent(navWorldEntity, x, y, radius, area, 24, areaCosts);
   };
   scriptApi._navBakeFn = function () {
     const navWorldEntity = navWorldSystem._firstNavWorld();
@@ -331,6 +360,22 @@ export function createGame({ pixiApp, followMainCamera = false, gameId }) {
   // only calls syncSpriteRender() selectively, never game.loop.start().
   const scriptSystem = new ScriptSystem(scriptApi);
   world.addSystem(scriptSystem);
+
+  // Script-driven Car input (this.controller.simulateDrive(throttle,
+  // steer) — see ControllerAPI.js) needs to run AFTER ScriptSystem for
+  // the same reason the render group below does: whatever a script
+  // just set THIS frame needs to be what actually drives the car THIS
+  // frame, not next frame. Car specifically (not the rest of
+  // ControllerSystem) is what moves here — the walk family/Patrol/
+  // Follow are deliberately left in ControllerSystem's original early
+  // slot (still added further up, before PhysicsSystem) so scripts
+  // keep seeing THIS frame's fresh isGrounded/isOnWall/etc. state (see
+  // ControllerAPI.js), exactly as before this fix. See
+  // ControllerSystem.updateLateCarInput's own doc comment for the full
+  // story of why Car alone needs this split. A tiny inline wrapper
+  // object (rather than a whole new file) since it's a one-line
+  // delegation with no state of its own.
+  world.addSystem({ update: (w, dt) => controllerSystem.updateLateCarInput(w, dt) });
 
   // RenderSystem (+ the rest of the render-adjacent group) is added
   // HERE — AFTER ScriptSystem — rather than earlier alongside Physics/

@@ -114,6 +114,9 @@ const ENGINE_MEMBERS = [
   // NavWorld2D one-line follow helper (this.navMoveToward — see
   // EntityContext.navMoveToward in ScriptAPI.js)
   "navMoveToward",
+  // Car-controller counterpart: NavWorld2D pathing + Car handling (see
+  // EntityContext.navDriveToward in ScriptAPI.js)
+  "navDriveToward",
   // Sprite
   "texture", "color", "flipX", "flipY", "opacity",
   // Text (color/opacity already listed above, shared with Sprite)
@@ -141,7 +144,8 @@ const ENGINE_MEMBERS = [
   // Controller (walk + car variants)
   "controllerType", "moveSpeed", "acceleration", "airControl", "useGravity",
   "useDefaultInput", "simulateMove", "simulateJump", "canJump", "jumpForce",
-  "maxJumps", "maxSpeed", "turnSpeed", "brakeForce", "driftFactor",
+  "maxJumps", "maxSpeed", "turnSpeed", "brakeForce", "driftFactor", "driveTowardArriveDistance",
+  "simulateDrive", "simulateDriveJoystick", "simulateDriveToward",
   "followDistance", "followSpeed", "targetName",
   "patrolDistance", "facingDirection", "flipDirection",
   // Animator
@@ -168,6 +172,10 @@ const ENGINE_MEMBERS = [
   "speed", "deceleration", "stoppingDistance", "autoRepath", "repathInterval",
   "repathDistance", "avoidanceEnabled", "avoidancePriority", "area",
   "collabEnabled", "collabGroupRadius",
+  "vehicleLookahead", "vehicleCornerLookahead", "vehicleObstacleLookahead",
+  "vehicleObstacleWidth", "vehicleSteerSmoothing", "vehicleSpeedSmoothing",
+  "vehicleCornerSlowdown", "vehicleObstacleBrake", "vehicleRecoveryTime",
+  "vehicleRecoveryReverseTime",
   "currentPath", "currentPathIndex",
   // Collider (this.collider.* — see ColliderAPI.js). width/layer/radius
   // are already covered above (Chat Log/Physics/Light) since this list

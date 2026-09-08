@@ -9,6 +9,7 @@
 
 import { editorState, pushLog, markDirty } from "./EditorState.js";
 import { getEngineSettings, setEngineSettings } from "./EngineSettings.js";
+import { androidExportEndpoint, androidExportHeaders, pollAndroidBuildJob, checkAndroidServerAwake, getActiveAndroidServer, listAndroidServers, setActiveAndroidServer, saveAndroidServer, deleteAndroidServer, ANDROID_KEYGEN_SITE_URL, uploadWebExportForAndroid } from "./ServerConfig.js";
 import { Transform, TRANSFORM } from "../../runtime/components/Transform.js";
 import { CAMERA } from "../../runtime/components/Camera.js";
 import { SPRITE_RENDERER, SpriteRenderer } from "../../runtime/components/SpriteRenderer.js";
@@ -30,7 +31,7 @@ import { AUDIO_LISTENER, AudioListener } from "../../runtime/components/AudioLis
 import { TILESET, Tileset, TILE_ROLE_ORDER } from "../../runtime/components/Tileset.js";
 import { TILEMAP, Tilemap, cellKey } from "../../runtime/components/Tilemap.js";
 import { NAV_WORLD_2D, NavWorld2D, setNavAreaCost } from "../../runtime/components/NavWorld2D.js";
-import { NAV_AGENT_2D, NavAgent2D } from "../../runtime/components/NavAgent2D.js";
+import { NAV_AGENT_2D, NavAgent2D, setNavAgentAreaCost } from "../../runtime/components/NavAgent2D.js";
 import { bakeNavWorld } from "../../runtime/pathfinding/NavWorldBaker.js";
 import { getColliderWorldGeometry } from "../../runtime/physics/ColliderGeometry.js";
 import { sliceTilesetImageIntoRoles, loadSingleTileImage } from "../tileset/TilesetImport.js";
@@ -1249,7 +1250,7 @@ let _lastSceneClick = { id: null, time: 0 };
       case "save-now": {
         // Manual, immediate save to this project's autosave slot (see
         // ProjectStorage.js's startAutosave/saveNow) — distinct from
-        // "save-project" above, which downloads a .zip. Guarded the
+        // "save-project" above, which downloads a .vs. Guarded the
         // same way that action is: no-op with nothing to do if there's
         // no game loaded or no autosave loop running for this project
         // (editorState.saveNow is only set for a launcher project —
@@ -1437,12 +1438,28 @@ let _lastSceneClick = { id: null, time: 0 };
           editorState.exportGameTitle = editorState.projectName || "";
         }
         editorState.openMenu = null; // close the File dropdown, if that's where this was clicked from
+        // Kick off a background check of the currently-selected Android
+        // build server so the card can show "Server awake" / "Server
+        // asleep" instead of the user finding out only after clicking
+        // Export and waiting.
+        editorState.androidServers = listAndroidServers();
+        editorState.androidActiveServerId = getActiveAndroidServer() ? getActiveAndroidServer().id : null;
+        editorState.androidServerStatus = "checking";
+        checkAndroidServerAwake(getActiveAndroidServer()).then((awake) => {
+          // Only apply if the modal is still open for this same check —
+          // avoids a stale result landing after the user already closed it.
+          if (!editorState.exportOpen) return;
+          editorState.androidServerStatus = awake ? "awake" : "asleep";
+          render();
+        });
         render();
         break;
       }
       case "close-export-window": {
         editorState.exportOpen = false;
         editorState.exportStatus = null;
+        editorState.androidServerStatus = null;
+        editorState.androidServerFormOpen = false;
         render();
         break;
       }
@@ -1456,6 +1473,77 @@ let _lastSceneClick = { id: null, time: 0 };
         render();
         break;
       }
+      case "android-server-select": {
+        const id = t.dataset.serverId;
+        setActiveAndroidServer(id);
+        editorState.androidServers = listAndroidServers();
+        editorState.androidActiveServerId = id;
+        // Re-check reachability for the newly-selected server.
+        editorState.androidServerStatus = "checking";
+        checkAndroidServerAwake(getActiveAndroidServer()).then((awake) => {
+          if (!editorState.exportOpen) return;
+          editorState.androidServerStatus = awake ? "awake" : "asleep";
+          render();
+        });
+        render();
+        break;
+      }
+      case "android-server-add-open": {
+        editorState.androidServerFormOpen = true;
+        editorState.androidServerFormEditingId = null;
+        editorState.androidServerFormLabel = "";
+        editorState.androidServerFormUrl = "";
+        editorState.androidServerFormKey = "";
+        render();
+        break;
+      }
+      case "android-server-edit-open": {
+        const id = t.dataset.serverId;
+        const server = listAndroidServers().find((s) => s.id === id);
+        if (!server) break;
+        editorState.androidServerFormOpen = true;
+        editorState.androidServerFormEditingId = id;
+        editorState.androidServerFormLabel = server.label;
+        editorState.androidServerFormUrl = server.serverUrl;
+        editorState.androidServerFormKey = server.apiKey;
+        render();
+        break;
+      }
+      case "android-server-form-cancel": {
+        editorState.androidServerFormOpen = false;
+        render();
+        break;
+      }
+      case "android-server-form-save": {
+        const url = (editorState.androidServerFormUrl || "").trim();
+        const key = (editorState.androidServerFormKey || "").trim();
+        if (!url || !key) break; // ExportWindow.js disables Save until both are filled
+        const id = saveAndroidServer(
+          { label: editorState.androidServerFormLabel, serverUrl: url, apiKey: key },
+          editorState.androidServerFormEditingId
+        );
+        setActiveAndroidServer(id);
+        editorState.androidServers = listAndroidServers();
+        editorState.androidActiveServerId = id;
+        editorState.androidServerFormOpen = false;
+        editorState.androidServerStatus = "checking";
+        checkAndroidServerAwake(getActiveAndroidServer()).then((awake) => {
+          if (!editorState.exportOpen) return;
+          editorState.androidServerStatus = awake ? "awake" : "asleep";
+          render();
+        });
+        render();
+        break;
+      }
+      case "android-server-delete": {
+        const id = t.dataset.serverId;
+        deleteAndroidServer(id);
+        editorState.androidServers = listAndroidServers();
+        const active = getActiveAndroidServer();
+        editorState.androidActiveServerId = active ? active.id : null;
+        render();
+        break;
+      }
       case "start-export": {
         if (!editorState.game) break;
         const format = t.dataset.format;
@@ -1463,6 +1551,15 @@ let _lastSceneClick = { id: null, time: 0 };
         editorState.exportStatus = { phase: "running", message: "Starting\u2026" };
         render();
         if (format === "android") {
+          const server = getActiveAndroidServer();
+          if (!server) {
+            editorState.exportStatus = {
+              phase: "error",
+              error: "No Android build server set up yet. Add one below \u2014 you'll need a server URL and API key from " + ANDROID_KEYGEN_SITE_URL + ".",
+            };
+            render();
+            break;
+          }
           buildExport(editorState.game, {
             projectName: gameTitle,
             faviconDataUrl: editorState.exportFavicon ? editorState.exportFavicon.dataUrl : null,
@@ -1480,9 +1577,13 @@ let _lastSceneClick = { id: null, time: 0 };
                 .then((blob) => {
                   editorState.exportStatus = { phase: "running", message: "Building APK on the server\u2026" };
                   render();
-                  return fetch("/api/android/export?name=" + encodeURIComponent(gameTitle), {
+                  return fetch(androidExportEndpoint(gameTitle, server), {
                     method: "POST",
-                    headers: { "Content-Type": "application/zip" },
+                    headers: androidExportHeaders(server, {
+                      "Content-Type": "application/zip",
+                      "X-ZenEngine-Export-Format": "html",
+                      "X-ZenEngine-Standalone-Export": "1",
+                    }),
                     body: blob,
                   }).then(async (response) => {
                     if (!response.ok) {
@@ -1492,13 +1593,69 @@ let _lastSceneClick = { id: null, time: 0 };
                             "This editor is being served by a static server that does not allow APK builds. " +
                             "Run the included server.js, or export an HTML5 ZIP and run export-apk.js.";
                         }
+                        if (response.status === 404) {
+                          message =
+                            "Android build server not found at that URL/route (404). Double-check the server URL " +
+                            "you saved for \u201C" + server.label + "\u201D (edit it in the Export popup) and that it " +
+                            "exposes POST /api/v1/build.";
+                        }
+                        if (response.status === 401 || response.status === 403) {
+                          message = "Android export server rejected the request: missing or wrong API key for \u201C" + server.label + "\u201D.";
+                        }
+                        if (response.status === 429) {
+                          message = "Too many Android export requests. Wait a bit and try again.";
+                        }
                       try {
                         const data = await response.json();
                         if (data && data.error) message = data.error;
                       } catch (_) {}
                       throw new Error(message);
                     }
-                    return { apk: await response.blob(), stats };
+                    // The build server is async: this response is a small
+                    // JSON job ticket ({ job: { status: "queued", ... },
+                    // statusUrl, downloadUrl }), NOT the APK. Poll until
+                    // the build finishes, then fetch the real binary from
+                    // its download URL. (Fixes: downloaded "APK" being a
+                    // few hundred bytes of JSON instead of a real build.)
+                    const jobTicket = await response.json();
+                    editorState.exportStatus = { phase: "running", message: "Build queued\u2026" };
+                    render();
+                    const downloadUrl = await pollAndroidBuildJob(jobTicket, server, {
+                      onProgress: (message) => {
+                        editorState.exportStatus = { phase: "running", message };
+                        render();
+                      },
+                    });
+                    if (!downloadUrl) {
+                      throw new Error("Android build finished but the server didn't provide a download URL.");
+                    }
+                    editorState.exportStatus = { phase: "running", message: "Downloading APK\u2026" };
+                    render();
+                    const apkResponse = await fetch(downloadUrl, { headers: androidExportHeaders(server) });
+                    if (!apkResponse.ok) {
+                      // The build server hands out the APK exactly once
+                      // (its copy is deleted right after a successful
+                      // download, to avoid piling up files on disk), so
+                      // these specific statuses have known meanings —
+                      // surface them instead of a bare status code.
+                      let message = "Failed to download the built APK (" + apkResponse.status + ").";
+                      if (apkResponse.status === 410) {
+                        message = "This APK was already downloaded once and the server's copy was deleted. Export again to build a new one.";
+                      } else if (apkResponse.status === 202) {
+                        message = "Server says the build isn't finished yet \u2014 try again in a moment.";
+                      } else if (apkResponse.status === 422) {
+                        try {
+                          const data = await apkResponse.json();
+                          message = data && data.error ? data.error : "Build failed on the server.";
+                        } catch (_) {
+                          message = "Build failed on the server.";
+                        }
+                      } else if (apkResponse.status === 404) {
+                        message = "Build job not found on the server (it may have restarted since this build started).";
+                      }
+                      throw new Error(message);
+                    }
+                    return { apk: await apkResponse.blob(), stats };
                   });
                 });
             })
@@ -1513,8 +1670,17 @@ let _lastSceneClick = { id: null, time: 0 };
               render();
             })
             .catch((err) => {
-              editorState.exportStatus = { phase: "error", error: err && err.message ? err.message : String(err) };
-              pushLog("error", "Android export failed: " + (err && err.message ? err.message : String(err)));
+              let message = err && err.message ? err.message : String(err);
+              // A sleeping/cold free-tier server (Replit free, Render free, etc.)
+              // makes fetch() throw a generic network error rather than
+              // returning a proper HTTP status — give a more useful hint here.
+              if (err instanceof TypeError) {
+                message =
+                  "Couldn't reach \u201C" + server.label + "\u201D. If it's hosted on a free tier, it may be " +
+                  "asleep \u2014 open " + server.serverUrl + " in a new tab to wake it up, then try again.";
+              }
+              editorState.exportStatus = { phase: "error", error: message };
+              pushLog("error", "Android export failed: " + message);
               render();
             });
           break;
@@ -1536,6 +1702,7 @@ let _lastSceneClick = { id: null, time: 0 };
               .then((blob) => {
                 const base = slugifyForFilename(gameTitle);
                 downloadBlob(blob, base + "-" + format + ".zip");
+                editorState.lastWebExport = { blob, format, title: gameTitle };
                 editorState.exportStatus = { phase: "done", stats };
                 pushLog("log", "Exported " + (format === "pwa" ? "PWA" : "HTML5") + " build.");
                 render();
@@ -1544,6 +1711,44 @@ let _lastSceneClick = { id: null, time: 0 };
           .catch((err) => {
             editorState.exportStatus = { phase: "error", error: err && err.message ? err.message : String(err) };
             pushLog("error", "Export failed: " + (err && err.message ? err.message : String(err)));
+            render();
+          });
+        break;
+      }
+case "build-apk-from-last-export": {
+        const webExport = editorState.lastWebExport;
+        const server = getActiveAndroidServer();
+        if (!webExport || !server) break;
+        editorState.exportStatus = { phase: "running", message: "Uploading the exact " + (webExport.format === "pwa" ? "PWA" : "HTML5") + " export…" };
+        render();
+        uploadWebExportForAndroid(webExport.blob, webExport.title, webExport.format, server)
+          .then(async (jobTicket) => {
+            editorState.exportStatus = { phase: "running", message: "Build queued…" };
+            render();
+            const downloadUrl = await pollAndroidBuildJob(jobTicket, server, {
+              onProgress: (message) => {
+                editorState.exportStatus = { phase: "running", message };
+                render();
+              },
+            });
+            if (!downloadUrl) throw new Error("Android build finished but the server didn't provide a download URL.");
+            editorState.exportStatus = { phase: "running", message: "Downloading APK…" };
+            render();
+            const apkResponse = await fetch(downloadUrl, { headers: androidExportHeaders(server) });
+            if (!apkResponse.ok) throw new Error("Failed to download the built APK (" + apkResponse.status + ").");
+            return apkResponse.blob();
+          })
+          .then((apk) => {
+            const base = slugifyForFilename(webExport.title);
+            downloadBlob(apk, base + "-android.apk");
+            editorState.exportStatus = { phase: "done", stats: { format: "android", sourceFormat: webExport.format, apkBytes: apk.size } };
+            pushLog("log", "Built Android APK from the exact " + webExport.format.toUpperCase() + " export package.");
+            render();
+          })
+          .catch((err) => {
+            const message = err && err.message ? err.message : String(err);
+            editorState.exportStatus = { phase: "error", error: message };
+            pushLog("error", "Android build from export failed: " + message);
             render();
           });
         break;
@@ -1784,7 +1989,18 @@ case "select-scene-file": {
     const _typing = /^(input|textarea)$/i.test(e.target.tagName) || e.target.isContentEditable;
     const _inScriptEditor = editorState.scriptEditor.open ||
       !!(e.target.closest && e.target.closest(".script-editor-overlay"));
-    if (_typing || _inScriptEditor || !editorState.world) return;
+    // Also back off for Ctrl/Cmd+C specifically when the user has an actual
+    // text selection (e.g. selecting an error message in the Export popup
+    // to copy it). Without this, this handler's preventDefault() on "c"
+    // below hijacks the browser's normal text copy and replaces it with
+    // "copy the selected scene entities" — which is a no-op with nothing
+    // selected in the scene, so Ctrl+C silently did nothing outside the
+    // canvas. Only Ctrl+C is loosened this way; Delete/Backspace/Paste/
+    // Duplicate keep the modal-aware checks below since they don't have
+    // an equivalent "let the browser handle it" fallback.
+    const _hasTextSelection = !!(window.getSelection && String(window.getSelection()).length > 0);
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "c" && _hasTextSelection) return;
+    if (_typing || _inScriptEditor || editorState.exportOpen || !editorState.world) return;
     if (e.key === "Delete" || e.key === "Backspace") {
       e.preventDefault(); // stop Backspace navigating back / Delete scrolling
       if (_liveSelectionIds().length === 0) return;
@@ -2199,6 +2415,19 @@ case "select-scene-file": {
       // "start-export" (which reads editorState.exportGameTitle, not
       // the DOM) always has the latest value even without a render.
       editorState.exportGameTitle = e.target.value;
+      return;
+    }
+
+    if (e.target.dataset.action === "android-server-label-input") {
+      editorState.androidServerFormLabel = e.target.value; // same live-buffer reasoning as export-title-input above
+      return;
+    }
+    if (e.target.dataset.action === "android-server-url-input") {
+      editorState.androidServerFormUrl = e.target.value;
+      return;
+    }
+    if (e.target.dataset.action === "android-server-key-input") {
+      editorState.androidServerFormKey = e.target.value;
       return;
     }
 
@@ -2802,6 +3031,52 @@ function applyFieldChange(field, inputEl) {
           navAgent.area = (navAgent.area & ~(1 << bit)) & 0xFFFF;
         }
         if (navAgent.area !== beforeArea) markDirty();
+      }
+    }
+    return;
+  }
+
+  // Nav Agent 2D's per-agent Area Costs list — the checkbox that turns
+  // an override for one area slot on/off. Same data-area-index
+  // indexed-array convention as NavWorld2D.areaCost below, applied to
+  // NavAgent2D.areaCosts instead — see that field's header in
+  // NavAgent2D.js for the "null until overridden, falls back to the
+  // Nav World 2D otherwise" semantics.
+  if (field === "NavAgent2D.areaCostOverrideEnabled") {
+    const navAgent = entity.getComponent(NAV_AGENT_2D);
+    if (navAgent) {
+      const idx = parseInt(inputEl.dataset.areaIndex, 10);
+      if (!isNaN(idx)) {
+        if (inputEl.checked) {
+          // Turning an override ON: seed it with whatever cost is
+          // currently DISPLAYED for this slot (the world default, read
+          // back off the paired number input in the same row) so
+          // checking the box doesn't silently jump the value — the
+          // agent starts out matching the world, then the number input
+          // becomes editable to diverge from it.
+          const row = inputEl.closest("div");
+          const numberInput = row ? row.querySelector('input[type="number"][data-field="NavAgent2D.areaCost"]') : null;
+          const seedValue = numberInput ? parseFloat(numberInput.value) : 1;
+          if (setNavAgentAreaCost(navAgent, idx, Number.isFinite(seedValue) ? seedValue : 1)) markDirty();
+        } else {
+          if (setNavAgentAreaCost(navAgent, idx, null)) markDirty();
+        }
+      }
+    }
+    return;
+  }
+
+  // Nav Agent 2D's per-agent Area Costs list — the numeric input itself,
+  // only live while its paired checkbox override is enabled (see the
+  // Inspector's `disabled` attribute on this input when unchecked).
+  if (field === "NavAgent2D.areaCost") {
+    const navAgent = entity.getComponent(NAV_AGENT_2D);
+    if (navAgent) {
+      const idx = parseInt(inputEl.dataset.areaIndex, 10);
+      if (!isNaN(idx) && setNavAgentAreaCost(navAgent, idx, parseFloat(inputEl.value))) {
+        // Same reasoning as NavWorld2D.areaCost below: this is scene
+        // data, not editor UI state, so autosave needs to see it.
+        markDirty();
       }
     }
     return;

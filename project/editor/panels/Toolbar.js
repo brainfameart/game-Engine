@@ -170,7 +170,7 @@ function renderFileMenu() {
     // "Save Now" — a real, immediate, awaited save to this project's
     // autosave slot (the same localStorage/IndexedDB snapshot the
     // 1-minute autosave loop writes to — see ProjectStorage.js), as
-    // opposed to "Save Project" below, which downloads a .zip. Only
+    // opposed to "Save Project" below, which downloads a .vs. Only
     // shown for a project actually opened from the launcher — an
     // editor opened standalone has no autosave loop/project id to save
     // into at all (see EditorState.js's saveNow doc comment). The
@@ -253,7 +253,7 @@ function renderFileMenu() {
     // Import Audio (a real <input type="file"> hidden and
     // programmatically clicked, listened to via the delegated "change"
     // handler in EditorEvents.js).
-    '<input type="file" accept=".zip" data-action="load-project-input" style="display:none;" />' +
+    '<input type="file" accept=".vs,.zip" data-action="load-project-input" style="display:none;" />' +
     "</div>"
   );
 }

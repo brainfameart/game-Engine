@@ -6,7 +6,18 @@
 <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
 <meta http-equiv="Pragma" content="no-cache" />
 <meta http-equiv="Expires" content="0" />
-<title>ZenEngine Editor</title>
+<title>Vaelis Editor</title>
+<!-- Same icon set as the Hub (index.html) so the browser tab icon
+     matches everywhere in the app. Google Search itself only reads ONE
+     favicon per hostname, taken from the homepage (see
+     developers.google.com/search/docs/appearance/favicon-in-search) —
+     since /editor lives on the same hostname as the Hub rather than a
+     separate subdomain, these links here only affect this page's own
+     browser tab, not what shows in Google Search results. -->
+<link rel="icon" href="/favicon.ico" sizes="any" />
+<link rel="icon" href="../../icons/icon-48.png" type="image/png" sizes="48x48" />
+<link rel="icon" href="../../icons/icon-192.png" type="image/png" sizes="192x192" />
+<link rel="apple-touch-icon" href="../../icons/icon-512.png" />
 <script src="../vendor/pixi/pixi.min.js"></script>
 <script src="../vendor/jszip/jszip.min.js"></script>
 <script src="../vendor/hammer/hammer.min.js"></script>
@@ -181,48 +192,75 @@ window.__zengineDirtyCheck = null; // set by main.js once EditorState.js has loa
     transition: opacity 0.5s ease, visibility 0.5s ease;
   }
   #zengine-boot-screen.zbs-hidden { opacity: 0; visibility: hidden; pointer-events: none; }
-  .zbs-inner { display: flex; flex-direction: column; align-items: center; gap: 22px; }
+  .zbs-inner { display: flex; flex-direction: column; align-items: center; gap: 26px; }
+
+  /* Logo: soft ambient glow behind it, plus a slow living
+     breathe (scale+brightness) so the frame never looks static
+     even during a long cold-cache load. */
   .zbs-mark {
-    width: 64px; height: 64px; position: relative;
+    width: 220px; height: auto; position: relative;
     display: flex; align-items: center; justify-content: center;
   }
-  .zbs-mark svg { width: 100%; height: 100%; }
-  .zbs-mark-ring {
-    fill: none; stroke: rgba(212,175,106,0.18); stroke-width: 2.5;
+  .zbs-mark::before {
+    content: '';
+    position: absolute; left: 50%; top: 50%;
+    width: 320px; height: 320px;
+    transform: translate(-50%, -50%);
+    background: radial-gradient(circle, rgba(110,120,255,0.35), rgba(120,60,255,0.12) 45%, transparent 70%);
+    filter: blur(18px);
+    animation: zbs-glow-pulse 3.2s ease-in-out infinite;
+    z-index: 0;
   }
-  .zbs-mark-arc {
-    fill: none; stroke: #d4af6a; stroke-width: 2.5; stroke-linecap: round;
-    stroke-dasharray: 130; stroke-dashoffset: 100;
-    transform-origin: 50% 50%;
-    animation: zbs-spin 1.4s cubic-bezier(0.65,0,0.35,1) infinite;
+  .zbs-mark img {
+    position: relative; z-index: 1;
+    width: 100%; height: auto; display: block;
+    filter: drop-shadow(0 0 18px rgba(130,110,255,0.45));
+    animation: zbs-breathe 3.2s ease-in-out infinite;
   }
-  @keyframes zbs-spin {
-    0%   { transform: rotate(0deg);   stroke-dashoffset: 100; }
-    50%  { transform: rotate(540deg); stroke-dashoffset: 25; }
-    100% { transform: rotate(1080deg); stroke-dashoffset: 100; }
+  @keyframes zbs-breathe {
+    0%, 100% { transform: scale(1); filter: drop-shadow(0 0 14px rgba(130,110,255,0.35)) brightness(1); }
+    50%      { transform: scale(1.035); filter: drop-shadow(0 0 26px rgba(150,130,255,0.6)) brightness(1.12); }
   }
-  .zbs-word {
-    font-size: 13px; letter-spacing: 0.28em; text-transform: uppercase;
-    color: #f4f4f6; font-weight: 600; text-align: center;
+  @keyframes zbs-glow-pulse {
+    0%, 100% { opacity: 0.55; transform: translate(-50%, -50%) scale(0.92); }
+    50%      { opacity: 1;    transform: translate(-50%, -50%) scale(1.08); }
   }
-  .zbs-word span { color: #d4af6a; }
+
   .zbs-sub {
-    font-size: 12px; color: #8e8e9a; text-align: center;
-    min-height: 16px; letter-spacing: 0.02em;
+    font-size: 12px; color: #9a9aac; text-align: center;
+    min-height: 16px; letter-spacing: 0.04em;
   }
+
+  /* Real progress bar: driven by JS (zbs-fill's width is set
+     directly), not a decorative sweep. A subtle sweep highlight
+     still runs on top so it reads as alive at both 0% and 100%. */
   .zbs-bar {
-    width: 220px; height: 2px; border-radius: 2px;
-    background: rgba(255,255,255,0.07); overflow: hidden; position: relative;
+    width: 240px; height: 4px; border-radius: 4px;
+    background: rgba(255,255,255,0.08); overflow: hidden; position: relative;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
   }
-  .zbs-bar::after {
-    content: ''; position: absolute; top: 0; bottom: 0; left: -40%;
-    width: 40%; border-radius: 2px;
-    background: linear-gradient(90deg, transparent, #d4af6a, transparent);
-    animation: zbs-sweep 1.5s ease-in-out infinite;
+  .zbs-bar-fill {
+    height: 100%; width: 0%; border-radius: 4px;
+    background: linear-gradient(90deg, #6e78ff, #b47cff);
+    box-shadow: 0 0 10px rgba(150,120,255,0.7);
+    transition: width 0.35s ease;
+    position: relative;
+    overflow: hidden;
+  }
+  .zbs-bar-fill::after {
+    content: '';
+    position: absolute; inset: 0;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.55), transparent);
+    width: 60%;
+    animation: zbs-sweep 1.3s ease-in-out infinite;
   }
   @keyframes zbs-sweep {
-    0%   { left: -40%; }
-    100% { left: 100%; }
+    0%   { transform: translateX(-120%); }
+    100% { transform: translateX(220%); }
+  }
+  .zbs-pct {
+    font-size: 11px; color: #6e78ff; letter-spacing: 0.08em;
+    font-variant-numeric: tabular-nums;
   }
 </style>
 </head>
@@ -230,13 +268,10 @@ window.__zengineDirtyCheck = null; // set by main.js once EditorState.js has loa
   <div id="zengine-boot-screen">
     <div class="zbs-inner">
       <div class="zbs-mark">
-        <svg viewBox="0 0 64 64">
-          <circle class="zbs-mark-ring" cx="32" cy="32" r="26"></circle>
-          <circle class="zbs-mark-arc" cx="32" cy="32" r="26"></circle>
-        </svg>
+        <img src="icons/boot-logo.jpg" alt="Vaelis" />
       </div>
-      <div class="zbs-word">Zen<span>Engine</span></div>
-      <div class="zbs-bar"></div>
+      <div class="zbs-bar"><div class="zbs-bar-fill" id="zbs-fill"></div></div>
+      <div class="zbs-pct" id="zbs-pct">0%</div>
       <div class="zbs-sub" id="zbs-status">Loading project&hellip;</div>
     </div>
   </div>
@@ -256,6 +291,23 @@ window.__zengineDirtyCheck = null; // set by main.js once EditorState.js has loa
       i = (i + 1) % lines.length;
       if (el) el.textContent = lines[i];
     }, 1800);
+
+    // Progress bar has no real granular signal to hook into (see
+    // note above about PIXI/JSZip/Hammer/Rapier not exposing load
+    // events), so it eases toward 90% and asymptotically slows,
+    // then reveal() below snaps it to 100% the instant #app
+    // actually has content — reads as genuine progress either way,
+    // fast or slow.
+    var fill = document.getElementById("zbs-fill");
+    var pct = document.getElementById("zbs-pct");
+    var current = 0;
+    window.__zengineBootProgress = setInterval(function () {
+      var remaining = 90 - current;
+      current += Math.max(remaining * 0.06, 0.15);
+      if (current > 90) current = 90;
+      if (fill) fill.style.width = current + "%";
+      if (pct) pct.textContent = Math.round(current) + "%";
+    }, 120);
   })();
   </script>
   <script>
@@ -270,6 +322,11 @@ window.__zengineDirtyCheck = null; // set by main.js once EditorState.js has loa
     if (!app || !boot) return;
     function reveal() {
       clearInterval(window.__zengineBootInterval);
+      clearInterval(window.__zengineBootProgress);
+      var fill = document.getElementById("zbs-fill");
+      var pct = document.getElementById("zbs-pct");
+      if (fill) fill.style.width = "100%";
+      if (pct) pct.textContent = "100%";
       boot.classList.add("zbs-hidden");
       setTimeout(function () {
         if (boot && boot.parentNode) boot.parentNode.removeChild(boot);

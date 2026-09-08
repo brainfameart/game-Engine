@@ -32,7 +32,7 @@
  * drag a joystick with the cursor exactly as touch does on a phone.
  *
  * Registered in runtime/index.js; needs the canvas to convert
- * clientX/clientY into canvas-pixel coordinates, so it's constructed as
+ * clientX/clientY into logical screen coordinates, so it's constructed as
  * `new JoystickSystem(pixiApp.view)` and wired up via attachInput(),
  * called once createGame() has the canvas (same two-step
  * construct-then-attach split attachPointerInput uses, for the same
@@ -42,11 +42,14 @@
 import { System } from "../core/System.js";
 import { TRANSFORM } from "../components/Transform.js";
 import { JOYSTICK, JoystickPositionMode } from "../components/Joystick.js";
+import { clientToLocal, prepareGameCanvas } from "../core/MobileViewport.js";
 
 export class JoystickSystem extends System {
-  constructor(canvas) {
+  constructor(canvas, pixiApp = null) {
     super();
     this.canvas = canvas;
+    this.pixiApp = pixiApp;
+    this.uiContainer = null;
     /** @type {Map<string|number, string>} pointer/touch id -> entityId currently claimed by it */
     this._claimedBy = new Map();
     /** @type {Map<string, {pointerId:string|number, originX:number, originY:number}>} entityId -> active drag info */
@@ -61,17 +64,20 @@ export class JoystickSystem extends System {
    * yet wherever this system gets constructed.
    * @param {HTMLCanvasElement} canvas
    */
-  attachInput(canvas) {
+  attachInput(canvas, uiContainer = null) {
+    this.uiContainer = uiContainer || this.uiContainer;
     if (!canvas || this._attached || typeof window === "undefined") return;
     this.canvas = canvas;
     this._attached = true;
     const self = this;
 
     function toCanvasXY(clientX, clientY) {
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      return { x: (clientX - rect.left) * scaleX, y: (clientY - rect.top) * scaleY };
+      // Joysticks live in the reference-resolution UI container, so invert
+      // that exact container transform rather than comparing a device-space
+      // pointer against reference-space Transform.x/y values.
+      const uiContainer = self.uiContainer || null;
+      const p = clientToLocal(clientX, clientY, canvas, self.pixiApp, uiContainer);
+      return { x: p.x, y: p.y };
     }
 
     function isTouchPointer(e) {
@@ -97,9 +103,7 @@ export class JoystickSystem extends System {
       self._release("mouse");
     });
 
-    canvas.style.touchAction = "none";
-    canvas.style.userSelect = "none";
-    canvas.style.webkitUserSelect = "none";
+    prepareGameCanvas(canvas);
 
     function handleTouchStart(id, clientX, clientY) {
       const p = toCanvasXY(clientX, clientY);
