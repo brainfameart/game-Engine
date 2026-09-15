@@ -18,6 +18,7 @@ import { LightType } from "../../runtime/components/Light.js";
 import { TILEMAP } from "../../runtime/components/Tilemap.js";
 import { TILESET } from "../../runtime/components/Tileset.js";
 import { NAV_WORLD_2D } from "../../runtime/components/NavWorld2D.js";
+import { STROKE_PATH } from "../../runtime/components/StrokePath.js";
 import { getNamedNavAreas } from "../state/NavAreas.js";
 
 const MENUS = ["File", "Edit", "GameObject"];
@@ -36,6 +37,7 @@ export function renderToolbar() {
   const hasTilemap = !!world && world.query(TILEMAP).length > 0;
   const hasTileset = !!world && world.query(TILESET).length > 0;
   const hasNavWorld = !!world && world.query(NAV_WORLD_2D).length > 0;
+  const hasStrokePath = !!world && world.query(STROKE_PATH).length > 0;
 
   const tools = [
     { id: "pan", iconName: "hand", shortcut: "Q" },
@@ -45,6 +47,16 @@ export function renderToolbar() {
   ];
   if (hasTilemap || hasTileset) tools.push({ id: "tile", iconName: "grid", shortcut: "T" });
   if (hasTilemap || hasNavWorld) tools.push({ id: "erase", iconName: "trash", shortcut: "Y" });
+  // Path tool only shows once a Stroke Path object exists in the scene —
+  // same "hidden until relevant" convention as tile/erase/nav-* below.
+  if (hasStrokePath) {
+    tools.push({
+      id: "path",
+      iconName: "waypoints",
+      shortcut: "P",
+      hint: "click empty space: append point to selected Stroke Path · drag a point: move it · click a segment: insert a point",
+    });
+  }
   if (hasNavWorld) {
     tools.push({ id: "nav", iconName: "route", shortcut: "U", hint: "click: walkable · alt+click: clear override" });
     tools.push({ id: "nav-block", iconName: "x", shortcut: "I", hint: "click: blocked · alt+click: clear override" });
@@ -336,6 +348,12 @@ function render2DObjectSubmenu() {
     '">' +
     icon("route", 12) +
     "<span>Nav World 2D</span>" +
+    "</button>" +
+    '<button class="dropdown-menu-item" data-action="create-strokepath" style="' +
+    DROPDOWN_ITEM_STYLE +
+    '">' +
+    icon("waypoints", 12) +
+    "<span>Stroke Path</span>" +
     "</button>" +
     "</div>"
   );

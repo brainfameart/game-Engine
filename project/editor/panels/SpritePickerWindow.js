@@ -19,7 +19,6 @@
 import { editorState } from "../state/EditorState.js";
 import { getAllSpriteAssets } from "../../runtime/assets/AssetRegistry.js";
 import { icon } from "../icons/IconLibrary.js";
-
 const PANEL_STYLE =
   "position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);" +
   "background:#1e2330;border:1px solid #3a4560;border-radius:8px;" +
@@ -80,7 +79,9 @@ export function renderSpritePickerWindow() {
     '<div data-action="close-sprite-picker" style="' + BACKDROP_STYLE + '"></div>' +
     '<div class="sprite-picker-window" style="' + PANEL_STYLE + '">' +
       '<div style="' + HEADER_STYLE + '">' +
-        '<span style="font-size:13px;font-weight:600;color:#c8d0de;">Choose Sprite</span>' +
+        '<span style="font-size:13px;font-weight:600;color:#c8d0de;">' +
+          (editorState.spritePickerTarget === "StrokePath" ? "Choose Texture" : "Choose Sprite") +
+        '</span>' +
         '<button data-action="close-sprite-picker" style="' + CLOSE_BTN_STYLE + '">✕</button>' +
       "</div>" +
       '<div style="' + GRID_STYLE + '">' + cells + "</div>" +

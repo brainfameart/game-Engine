@@ -58,8 +58,9 @@ import { TRANSFORM } from "./components/Transform.js";
  * @param {boolean} [opts.followMainCamera=false] pass true when pixiApp's
  *   stage IS the actual game screen (play-mode popup, standalone player)
  *   so RenderSystem offsets the world by the Main Camera's position.
- *   Leave false/omitted for the editor's Scene viewport, which drives its
- *   own free-roam pan/zoom over the same stage instead.
+ * @param {boolean} [opts.editorPreview=false] legacy option retained for
+ *   compatibility. Editor, Play Mode, and exported games use the same
+ *   rendering-quality path; this flag no longer reduces visual quality.
  * @returns {{
  *   world: World,
  *   loop: GameLoop,
@@ -71,7 +72,7 @@ import { TRANSFORM } from "./components/Transform.js";
  *   validate: () => { ok: boolean, errors: string[] },
  * }}
  */
-export function createGame({ pixiApp, followMainCamera = false, gameId }) {
+export function createGame({ pixiApp, followMainCamera = false, editorPreview = false, gameId, navAreaNames = null }) {
   window.__zenginePixiApp = pixiApp; // used by AssetManager for placeholder texture generation
 
   const world = new World();
@@ -198,7 +199,7 @@ export function createGame({ pixiApp, followMainCamera = false, gameId }) {
   // sprite bounds for dynamic shadow casting (see
   // LightingSystem.`_collectOccluders`) — always available here since
   // renderSystem is constructed just above.
-  const lightingSystem = new LightingSystem(gameContentContainer, renderSystem, pixiApp);
+  const lightingSystem = new LightingSystem(gameContentContainer, renderSystem, pixiApp, { editorPreview });
   // CameraRenderSystem must run AFTER RenderSystem + LightingSystem so
   // the worldContainer is fully synced and lit before capture. It
   // renders any camera with renderToSpriteEntityId set (set via
@@ -233,6 +234,12 @@ export function createGame({ pixiApp, followMainCamera = false, gameId }) {
   world.addSystem(audioListenerSystem);
 
   const scriptApi = new ScriptAPI(world);
+  // Backs nav.areaIndex()/nav.areaMask() (see ScriptAPI.js's nav.* doc
+  // comments and NavAPI.js's resolveNavAreaIndex/resolveNavAreaMask) —
+  // the caller's Edit → Nav Areas… name registry, or null if this host
+  // never wired it through (area name lookups then just always miss,
+  // same as an empty project with no named areas).
+  scriptApi._navAreaNames = navAreaNames;
   // `save` (see scripting/components/SaveAPI.js) persists to an
   // IndexedDB database namespaced by gameId, so two different
   // ZenEngine games in the same browser never see each other's save
@@ -425,7 +432,7 @@ export function createGame({ pixiApp, followMainCamera = false, gameId }) {
   scriptApi._audioListenerRangeFn = function (listenerEntityId) {
     return audioListenerSystem.getInRange(listenerEntityId);
   };
-  const loop = new GameLoop(world, { scriptSystem: scriptSystem });
+  const loop = new GameLoop(world, { scriptSystem: scriptSystem, pixiApp: pixiApp });
 
   // Remember the initial scene data so scene.restart() can reload it.
   // Stored as a deep-clone so in-flight mutations to the original object

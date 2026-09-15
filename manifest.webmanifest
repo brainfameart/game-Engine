@@ -1,7 +1,7 @@
 {
   "name": "Vaelis Hub",
   "short_name": "Vaelis",
-  "description": "Browser-based 2D game engine — projects, editor and player.",
+  "description": "Browser-based 2D game engine \u2014 projects, editor and player.",
   "start_url": "/index.html",
   "scope": "/",
   "display": "standalone",
@@ -9,8 +9,24 @@
   "theme_color": "#07070b",
   "orientation": "any",
   "icons": [
-    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
-    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
-  ]
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icons/icon-512-maskable.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ],
+  "id": "./"
 }

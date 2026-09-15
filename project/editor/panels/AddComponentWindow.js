@@ -26,6 +26,7 @@ import { CHARACTER_CONTROLLER } from "../../runtime/components/CharacterControll
 import { SPRITE_ANIMATION } from "../../runtime/components/SpriteAnimation.js";
 import { SPRITE_RENDERER } from "../../runtime/components/SpriteRenderer.js";
 import { SHAPE_RENDERER } from "../../runtime/components/ShapeRenderer.js";
+import { STROKE_PATH } from "../../runtime/components/StrokePath.js";
 import { LIGHT } from "../../runtime/components/Light.js";
 import { AUDIO_SOURCE } from "../../runtime/components/AudioSource.js";
 import { AUDIO_LISTENER } from "../../runtime/components/AudioListener.js";
@@ -56,6 +57,7 @@ function _computeAvailableToAdd(entity) {
     !entity.getComponent(SPRITE_RENDERER) && { name: "SpriteRenderer", label: "Sprite Renderer" },
     !entity.getComponent(SPRITE_ANIMATION) && { name: "SpriteAnimation", label: "Sprite Animation" },
     !entity.getComponent(SHAPE_RENDERER) && { name: "ShapeRenderer", label: "Shape Renderer" },
+    !entity.getComponent(STROKE_PATH) && { name: "StrokePath", label: "Stroke Path" },
     !entity.getComponent(LIGHT) && { name: "Light", label: "Light" },
     !entity.getComponent(AUDIO_SOURCE) && { name: "AudioSource", label: "Audio Source" },
     !entity.getComponent(AUDIO_LISTENER) && { name: "AudioListener", label: "Audio Listener" },

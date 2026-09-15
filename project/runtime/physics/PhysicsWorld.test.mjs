@@ -280,6 +280,51 @@ for (const wallType of [BodyType.STATIC, BodyType.KINEMATIC]) {
   console.log(`PASS dynamic no-wall-sticking behavior (${wallType})`, {x:tf.x,y:tf.y,vx:velX,vy:velY});
 }
 
+// 7b) A controller-driven Dynamic must not lose its gravity/fall velocity
+// just because a high-speed wall impact is producing friction. This deliberately
+// forces a high-friction Rapier material after collider creation to exercise the
+// anti-sticking guard independently of the normal movement-material setup.
+for (const speed of [300, 600, 1000, 1500]) {
+  const world=new World();
+  const wall=addBody(world,'Wall',BodyType.STATIC,150,200,20,500);
+  wall.getComponent(COLLIDER_2D).friction=1;
+  const dyn=addBody(world,'Player',BodyType.DYNAMIC,100,250,20,20,{gravityScale:1,linearDamping:0,lockRotation:true});
+  dyn.addComponent(CHARACTER_CONTROLLER,new CharacterController({controllerType:'Platformer'}));
+  const rb=dyn.getComponent(RIGIDBODY_2D);
+  physics.clear();
+
+  // First sync creates the Rapier colliders. Override the runtime material so
+  // the test reproduces the failure mode even though Movement Type normally
+  // forces the player collider to zero friction.
+  rb.driveVelocityY=-600;
+  physics.step(world,1/60,null);
+  const dynHandle=physics._handles.get(dyn.id);
+  dynHandle.collider.setFriction(1);
+  dynHandle.collider.setFrictionCombineRule(physics.RAPIER.CoefficientCombineRule.Average);
+
+  let wallHitFrame=-1;
+  let vyAtHit=null;
+  for(let i=0;i<60;i++) {
+    rb.driveVelocityX=speed;
+    physics.step(world,1/60,null);
+    if(wallHitFrame<0 && rb.isOnWall) {
+      wallHitFrame=i;
+      vyAtHit=rb.velocityY;
+    }
+  }
+  if (wallHitFrame < 0) throw new Error(`high-speed wall test never contacted wall at speed=${speed}`);
+  // Once the body is sliding on the wall, gravity must continue changing Y
+  // at the normal rate instead of collapsing toward zero as impact speed rises.
+  const vyBefore=rb.velocityY;
+  rb.driveVelocityX=0;
+  physics.step(world,1/60,null);
+  const vyAfter=rb.velocityY;
+  if (!(vyAfter > vyBefore + 10)) {
+    throw new Error(`wall impact stole falling velocity at speed=${speed}: vy ${vyBefore} -> ${vyAfter}`);
+  }
+  console.log(`PASS high-speed dynamic wall fall preservation (${speed})`, {wallHitFrame,vyAtHit,vyBefore,vyAfter});
+}
+
 // 11) A Kinematic mover pushes a free Dynamic body normally, but when that
 // Dynamic reaches either a Static or Kinematic obstacle, the Kinematic mover
 // must stop at the Dynamic rather than ghosting through it.

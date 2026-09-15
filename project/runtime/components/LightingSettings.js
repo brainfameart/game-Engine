@@ -62,8 +62,8 @@ export class LightingSettings {
     /** @type {string} one of ShadowMode ("quad" | "raymarch") */
     this.shadowMode = shadowMode;
 
-    /** @type {number} 1-48, only used when shadowMode === "raymarch" */
-    this.raymarchSteps = raymarchSteps;
+    /** @type {number} 1-200, only used when shadowMode === "raymarch" */
+    this.raymarchSteps = Math.max(1, Math.min(200, Number(raymarchSteps) || 24));
 
     /** @type {number} 0-1, how dark unlit areas get */
     this.ambientDarkness = ambientDarkness;

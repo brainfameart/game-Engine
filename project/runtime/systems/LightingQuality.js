@@ -38,6 +38,6 @@ export class LightingQuality {
     // reasonable default for typical scene sizes/occluder counts;
     // expose it in a game's settings menu alongside shadowMode itself
     // for a "shadow quality: low/medium/high" style slider.
-    this.raymarchSteps = raymarchSteps;
+    this.raymarchSteps = Math.max(1, Math.min(200, Number(raymarchSteps) || 24));
   }
 }

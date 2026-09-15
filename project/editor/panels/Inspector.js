@@ -14,6 +14,7 @@ import { TRANSFORM } from "../../runtime/components/Transform.js";
 import { CAMERA, CameraAspectMode, ScalingMode } from "../../runtime/components/Camera.js";
 import { SPRITE_RENDERER } from "../../runtime/components/SpriteRenderer.js";
 import { SHAPE_RENDERER, ShapeType } from "../../runtime/components/ShapeRenderer.js";
+import { STROKE_PATH, StrokePathTextureMode, StrokePathJointMode, StrokePathCapMode } from "../../runtime/components/StrokePath.js";
 import { TEXT_RENDERER } from "../../runtime/components/TextRenderer.js";
 import { SPEECH_BUBBLE } from "../../runtime/components/SpeechBubble.js";
 import { CHAT_LOG } from "../../runtime/components/ChatLog.js";
@@ -304,6 +305,112 @@ export function renderInspector() {
             row("Outline Width", numInput("", shapeRenderer.outlineWidth, "ShapeRenderer.outlineWidth"))
           : "") +
         '<button class="removecomp-btn" data-action="remove-component" data-component="ShapeRenderer" style="margin-top:6px;">Remove Component</button>'
+    );
+  }
+
+  const strokePath = entity.getComponent(STROKE_PATH);
+  if (strokePath) {
+    const textureAsset = strokePath.textureKey ? getSpriteAsset(strokePath.textureKey) : null;
+    const textureDisplayName = textureAsset ? textureAsset.name : strokePath.textureKey || "None";
+
+    body += section(
+      editorState.sectionsOpen,
+      "strokepath",
+      "Stroke Path",
+      "waypoints",
+      '<div style="color:#888;font-size:11px;line-height:1.4;margin-bottom:6px;">Use the Path tool (P) in the toolbar to click and add points, drag any point to adjust it, or click a segment to insert one. Alt+click a point to remove it.</div>' +
+        row("Thickness", numInput("", strokePath.thickness, "StrokePath.thickness")) +
+        row(
+          "Opacity",
+          numInput("", strokePath.opacity != null ? strokePath.opacity : 1, "StrokePath.opacity")
+        ) +
+        row(
+          "Joints",
+          dropdownInput(
+            [
+              { value: StrokePathJointMode.SHARP, label: "Sharp" },
+              { value: StrokePathJointMode.BEVEL, label: "Bevel" },
+              { value: StrokePathJointMode.ROUND, label: "Round" },
+            ],
+            strokePath.jointMode,
+            "StrokePath.jointMode"
+          )
+        ) +
+        row(
+          "End Caps",
+          dropdownInput(
+            [
+              { value: StrokePathCapMode.NONE, label: "None" },
+              { value: StrokePathCapMode.BOX, label: "Box" },
+              { value: StrokePathCapMode.ROUND, label: "Round" },
+            ],
+            strokePath.capMode,
+            "StrokePath.capMode"
+          )
+        ) +
+        row(
+          "Smoothing",
+          numInput("", strokePath.smoothing != null ? strokePath.smoothing : 0, "StrokePath.smoothing")
+        ) +
+        '<div style="color:#888;font-size:10px;margin:-4px 0 6px;">0 = straight segments between points (as drawn). Raise toward 1 to turn the path into a smooth spline curve through the same points — fixes pinched/warped texture on sharp turns. Try 0.4-0.7 for a road/river; 1 for a fully rounded curve.</div>' +
+        row(
+          "Use Texture",
+          '<input type="checkbox" data-field="StrokePath.useTexture" style="accent-color:#2C5D87;margin:0;"' +
+            (strokePath.useTexture ? " checked" : "") +
+            "/>"
+        ) +
+        (strokePath.useTexture
+          ? row(
+              "Texture",
+              '<div class="sprite-row"><div class="sprite-box">' +
+                textureDisplayName +
+                '</div><button class="sprite-pick" data-action="open-sprite-picker" data-target="StrokePath" title="Choose a texture"><span></span></button></div>'
+            ) +
+              row(
+                "Texture Mode",
+                dropdownInput(
+                  [
+                    { value: StrokePathTextureMode.STRETCH, label: "Stretch" },
+                    { value: StrokePathTextureMode.TILE, label: "Tile (no stretch)" },
+                  ],
+                  strokePath.textureMode,
+                  "StrokePath.textureMode"
+                ) +
+                  (strokePath.textureMode === StrokePathTextureMode.STRETCH
+                    ? '<div style="color:#888;font-size:10px;margin-top:3px;">Fits the whole image to the path — image warps if the path\'s length changes.</div>'
+                    : '<div style="color:#888;font-size:10px;margin-top:3px;">Repeats the image at its own size — never stretches, however long the path is.</div>')
+              ) +
+              (strokePath.textureMode === StrokePathTextureMode.TILE
+                ? row(
+                    "Tile Length",
+                    numInput("", strokePath.textureTiling, "StrokePath.textureTiling")
+                  )
+                : "") +
+              row(
+                "Tile Across",
+                numInput("", strokePath.textureScale, "StrokePath.textureScale")
+              ) +
+              row(
+                "Texture Offset",
+                numInput("", strokePath.textureOffset, "StrokePath.textureOffset")
+              ) +
+              row(
+                "Flip Texture",
+                '<input type="checkbox" data-field="StrokePath.textureFlip" style="accent-color:#2C5D87;margin:0;"' +
+                  (strokePath.textureFlip ? " checked" : "") +
+                  "/>"
+              ) +
+              row(
+                "Texture Rotation",
+                numInput("", strokePath.textureRotation, "StrokePath.textureRotation")
+              )
+          : row(
+              "Color",
+              '<input type="color" class="color-swatch-input" value="' +
+                strokePath.color +
+                '" data-field="StrokePath.color" />'
+            )) +
+        '<button class="removecomp-btn" data-action="remove-component" data-component="StrokePath" style="margin-top:6px;">Remove Component</button>'
     );
   }
 
@@ -714,6 +821,26 @@ export function renderInspector() {
             '" data-field="Light.color" />'
         ) +
         row("Intensity", numInput("", light.intensity, "Light.intensity")) +
+        row("Core Size", numInput("", light.coreSize, "Light.coreSize")) +
+        row(
+          "Core Visible",
+          '<input type="checkbox" data-field="Light.coreVisible" style="accent-color:#2C5D87;margin:0;"' +
+            (light.coreVisible !== false ? " checked" : "") +
+            '/>'
+        ) +
+        row(
+          "Flicker",
+          '<input type="checkbox" data-field="Light.flicker" style="accent-color:#2C5D87;margin:0;"' +
+            (light.flicker ? " checked" : "") +
+            "/>"
+        ) +
+        (light.flicker
+          ? row("Flicker Speed", numInput("", light.flickerSpeed, "Light.flickerSpeed")) +
+            row("Flicker Duration", numInput("", light.flickerDuration, "Light.flickerDuration")) +
+            '<div class="static-body-note" style="padding:2px 0 6px;color:#8a93a0;font-size:10px;">' +
+              "Speed is cycles per second. Duration is seconds; 0 means forever." +
+            "</div>"
+          : "") +
         typeSpecificHtml +
         row(
           "Affects World",
@@ -1173,9 +1300,9 @@ export function renderInspector() {
         "Quad: cheap analytic shadows, best for lower-end machines. Raymarch: true per-pixel shadows with realistic soft edges, costs more GPU time." +
         "</div>" +
         (lightingSettings.shadowMode === ShadowMode.RAYMARCH
-          ? row("Raymarch Steps", numInput("", lightingSettings.raymarchSteps, "LightingSettings.raymarchSteps")) +
+          ? row("Raymarch Steps", '<input type="number" min="1" max="200" step="1" value="' + Math.max(1, Math.min(200, Number(lightingSettings.raymarchSteps) || 24)) + '" data-field="LightingSettings.raymarchSteps" />') +
             '<div class="static-body-note" style="padding:2px 0 6px;color:#8a93a0;font-size:10px;">' +
-            "Higher = smoother, more accurate shadow edges (fewer thin shadows 'leaking' light through), at a higher GPU cost. 24 is a good starting point; try lower values first if this looks too slow." +
+            "Higher = smoother, more accurate shadow edges (fewer thin shadows 'leaking' light through), at a higher GPU cost. 24 is a good starting point; up to 200 is available for very high-quality shadows, but higher values cost significantly more GPU time." +
             "</div>"
           : "") +
         row("Ambient Darkness", numInput("", lightingSettings.ambientDarkness, "LightingSettings.ambientDarkness")) +
@@ -1264,6 +1391,12 @@ export function renderInspector() {
   }
 
   const rigidbody = entity.getComponent(RIGIDBODY_2D);
+  // Fetched early (controller is normally looked up much further below,
+  // see its own section) because the Freeze Rotation checkbox just below
+  // needs to know up front whether a Car-type CharacterController is
+  // steering this same body — see that checkbox's own comment.
+  const controllerForRotationCheck = entity.getComponent(CHARACTER_CONTROLLER);
+  const isCarSteered = controllerForRotationCheck && controllerForRotationCheck.controllerType === ControllerType.CAR;
   if (rigidbody) {
     let bodyTypeFieldsHtml = "";
 
@@ -1298,7 +1431,12 @@ export function renderInspector() {
           '<input type="checkbox" data-field="Rigidbody2D.lockRotation" style="accent-color:#2C5D87;margin:0;"' +
             (rigidbody.lockRotation ? " checked" : "") +
             "/>"
-        );
+        ) +
+        (isCarSteered && rigidbody.lockRotation
+          ? '<div class="static-body-warning" style="padding:6px 4px;color:#c0863a;font-size:11px;">' +
+            "Freeze Rotation is on, but this entity's CharacterController is set to Car — Car steering rotates the body every frame, so freezing it means the visible sprite turns while the physics collider stays facing its original direction. Turn Freeze Rotation off for a Car controller to steer correctly." +
+            "</div>"
+          : "");
     } else {
       // Static: never moves. No mass/gravity/damping/velocity fields —
       // it's just an immovable collider anchor, matching Unity's

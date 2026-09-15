@@ -125,7 +125,7 @@ export function refreshSyntaxCheck(monaco, model, scriptName) {
       // Never let a worker hiccup (e.g. the JS worker script failing to
           // load, same class of local vendor failure _reportMonacoLoadFailure
           // already guards against elsewhere) break the editor.
-      console.warn("[ZenEngine] live syntax check failed:", e);
+      console.warn("[Vaelis] live syntax check failed:", e);
     });
 }
 

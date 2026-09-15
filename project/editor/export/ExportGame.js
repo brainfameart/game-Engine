@@ -56,6 +56,7 @@ import { findUsedAssetKeys } from "./UsedAssets.js";
 import { transcodeImage, transcodeAudio, renderIconPng } from "./TranscodeAssets.js";
 import { getAllScripts, getScriptSource } from "../scripting/ScriptStorage.js";
 import { ENGINE_VERSION } from "../../runtime/EngineVersion.js";
+import { getNavAreaNames } from "../state/NavAreas.js";
 
 /**
  * Every /runtime file the exported build needs, relative to
@@ -89,6 +90,8 @@ const RUNTIME_FILES = [
   "components/SpeechBubble.js",
   "components/SpriteAnimation.js",
   "components/SpriteRenderer.js",
+  "components/StrokePath.js",
+  "components/StrokePathGeometry.js",
   "components/TextInput.js",
   "components/TextRenderer.js",
   "components/Tilemap.js",
@@ -221,13 +224,19 @@ function slugify(name) {
  * instead of the editor's in-memory dataUrl catalogue, since an
  * exported build has no AssetRegistry/editor session to read from.
  *
- * @param {{ spriteManifest: Array<{key:string,file:string}>, audioManifest: Array<{key:string,file:string}>, gameFps: number }} opts
+ * @param {{ spriteManifest: Array<{key:string,file:string}>, audioManifest: Array<{key:string,file:string}>, gameFps: number, navAreaNames: string[] }} opts
  * @returns {string} JS source for main.js
  */
 function buildMainJs(opts) {
   const spriteManifest = opts.spriteManifest;
   const audioManifest = opts.audioManifest;
   const gameFps = opts.gameFps;
+  // Baked in at export time (an exported build has no localStorage-backed
+  // NavAreas.js registry to read at runtime, same reason spriteManifest/
+  // audioManifest are baked file lists rather than live AssetRegistry
+  // lookups) — backs nav.areaIndex()/nav.areaMask() in the shipped game.
+  // See runtime/index.js's createGame({ navAreaNames }) and NavAPI.js.
+  const navAreaNames = opts.navAreaNames || [];
   return [
     "/**",
     " * main.js — standalone exported Vaelis game.",
@@ -290,7 +299,7 @@ function buildMainJs(opts) {
     "  await loadSpriteAssets();",
     "  loadAudioAssets();",
     "",
-    '  const game = createGame({ pixiApp, followMainCamera: true, gameId: document.title || "zenengine-game" });',
+    '  const game = createGame({ pixiApp, followMainCamera: true, gameId: document.title || "zenengine-game", navAreaNames: ' + JSON.stringify(navAreaNames) + ' });',
     "  game.loop.setTargetFps(" + JSON.stringify(gameFps || 0) + ");",
     "",
     "  try {",
@@ -348,7 +357,7 @@ function buildIndexHtml(title, pwa, hasFavicon) {
     ? '<link rel="icon" type="image/png" href="' + iconHref + '" />\n'
     : "";
   const pwaBody = pwa
-    ? '  <script>\n    if ("serviceWorker" in navigator) {\n      window.addEventListener("load", function () { navigator.serviceWorker.register("./sw.js"); });\n    }\n  </script>\n'
+    ? '  <script>\n    if ("serviceWorker" in navigator) {\n      window.addEventListener("load", function () { navigator.serviceWorker.register("./sw.js", { scope: "./", updateViaCache: "none" }); });\n    }\n  </script>\n'
     : "";
   return (
     '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="UTF-8" />\n' +
@@ -380,13 +389,14 @@ function escapeHtml(s) {
  * @param {string} cacheName
  * @returns {string}
  */
-export function buildServiceWorker(files, cacheName) {
-  // IMPORTANT: an exported PWA may be opened on the same origin as the
-  // engine/editor. Service workers share CacheStorage by origin, so this
-  // worker must never delete or read another application's cache. The old
-  // implementation deleted every cache except its own, which could wipe the
-  // engine's offline cache and make the editor appear to have lost files.
-  const cachePrefix = "zenengine-game-";
+function buildServiceWorker(files, cacheName) {
+  // IMPORTANT: the engine/editor and multiple exported PWAs may be hosted on
+  // the exact same origin (GitHub Pages, Vercel, etc.). CacheStorage is shared
+  // by origin, so this service worker must never delete/read another app's
+  // caches. The cacheName is generated per exported project slug; derive the
+  // cleanup prefix from that exact cache name so installing/updating Game B
+  // can never delete Game A's cache.
+  const cachePrefix = cacheName.replace(/-v\d+$/, "-");
   return (
     "const CACHE_NAME = " + JSON.stringify(cacheName) + ";\n" +
     "const CACHE_PREFIX = " + JSON.stringify(cachePrefix) + ";\n" +
@@ -398,9 +408,7 @@ export function buildServiceWorker(files, cacheName) {
     'self.addEventListener("activate", function (event) {\n' +
     "  event.waitUntil(\n" +
     "    caches.keys().then(function (names) {\n" +
-    "      // Only remove previous caches belonging to THIS exported-game\n" +
-    "      // family. Never touch the engine/editor or another app.\n" +
-    "      return Promise.all(names.filter(function (n) { return n.startsWith(CACHE_PREFIX) && n !== CACHE_NAME; }).map(function (n) { return caches.delete(n); }));\n" +
+    "      return Promise.all(names.filter(function (n) { return n.indexOf(CACHE_PREFIX) === 0 && n !== CACHE_NAME; }).map(function (n) { return caches.delete(n); }));\n" +
     "    }).then(function () { return self.clients.claim(); })\n" +
     "  );\n});\n\n" +
     'self.addEventListener("fetch", function (event) {\n' +
@@ -420,6 +428,10 @@ function buildWebManifest(name, slug) {
   return {
     name,
     short_name: name.slice(0, 30) || slug,
+    // Resolve the app identity from this manifest's own directory. This
+    // keeps two games on the same origin as separate installed apps even
+    // when their hosting path changes (for example GitHub Pages).
+    id: "./",
     start_url: "./index.html",
     scope: "./",
     display: "standalone",
@@ -622,7 +634,7 @@ export async function buildExport(game, options) {
 
   // --- 6. Bootstrap files ---
   onProgress("Writing game files…");
-  zip.file("main.js", buildMainJs({ spriteManifest, audioManifest, gameFps: 0 }));
+  zip.file("main.js", buildMainJs({ spriteManifest, audioManifest, gameFps: 0, navAreaNames: getNavAreaNames() }));
   zip.file("index.html", buildIndexHtml(title, format === "pwa", hasFavicon));
   zip.file(
     "EXPORT_INFO.txt",
@@ -668,6 +680,8 @@ export async function buildExport(game, options) {
  * @param {string} name
  * @returns {string} filesystem-safe download filename base (no extension)
  */
+export { buildServiceWorker };
+
 export function slugifyForFilename(name) {
   return slugify(name);
 }

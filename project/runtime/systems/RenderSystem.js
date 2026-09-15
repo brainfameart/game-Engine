@@ -30,6 +30,8 @@ import { System } from "../core/System.js";
 import { TRANSFORM } from "../components/Transform.js";
 import { SPRITE_RENDERER } from "../components/SpriteRenderer.js";
 import { SHAPE_RENDERER, ShapeType } from "../components/ShapeRenderer.js";
+import { STROKE_PATH, StrokePathTextureMode } from "../components/StrokePath.js";
+import { buildStrokePathMesh } from "../components/StrokePathGeometry.js";
 import { TEXT_RENDERER } from "../components/TextRenderer.js";
 import { SPEECH_BUBBLE } from "../components/SpeechBubble.js";
 import { CHAT_LOG } from "../components/ChatLog.js";
@@ -53,6 +55,10 @@ function _hexToNumber(hexColorString) {
 // gradual/subtle size falloff per unit of Z; smaller = more dramatic.
 const DEPTH_REFERENCE = 500;
 const MIN_DEPTH_SCALE = 0.02; // guards against z >= DEPTH_REFERENCE going negative/infinite
+
+function objVertexCount(obj) {
+  return obj ? obj.geometry.getBuffer("aVertexPosition").data.length / 2 : -1;
+}
 
 export class RenderSystem extends System {
   /**
@@ -95,6 +101,10 @@ export class RenderSystem extends System {
     this.pixiApp = opts.pixiApp || null;
     /** @type {Map<string, PIXI.Graphics>} entityId -> vector shape */
     this._shapes = new Map();
+    /** @type {Map<string, PIXI.Container>} entityId -> StrokePath display object (a Graphics in color mode, a SimpleMesh in texture mode — see the StrokePath drawing block below for why the object TYPE itself is swapped rather than reused) */
+    this._strokePaths = new Map();
+    /** @type {Map<string, boolean>} entityId -> whether _strokePaths' current display object was built for texture mode, so a color<->texture switch is detected and rebuilt (a Graphics can't become a SimpleMesh in place, or vice versa) rather than silently doing nothing */
+    this._strokePathModes = new Map();
     /** @type {Map<string, PIXI.Text>} entityId -> text */
     this._texts = new Map();
     /** @type {Map<string, {container: PIXI.Container, bg: PIXI.Graphics, label: PIXI.Text}>} entityId -> speech bubble parts */
@@ -253,6 +263,174 @@ export class RenderSystem extends System {
         this.worldContainer.removeChild(gfx);
         gfx.destroy();
         this._shapes.delete(entityId);
+      }
+    }
+
+    // ── StrokePath entities ─────────────────────────────────────────
+    // Stroke paths share ONE canonical triangle tessellation between the
+    // editor and runtime. Color mode draws those triangles with Graphics;
+    // texture mode uses the same vertices/UVs in a SimpleMesh. No single
+    // concave polygon is ever handed to PIXI, so turns/caps cannot cause
+    // accidental long-distance connections.
+    const strokePathEntities = world.query(TRANSFORM, STROKE_PATH);
+    const strokePathSeen = new Set();
+
+    for (const entity of strokePathEntities) {
+      strokePathSeen.add(entity.id);
+      const transform = entity.getComponent(TRANSFORM);
+      const strokePath = entity.getComponent(STROKE_PATH);
+      const wantTexture = !!strokePath.useTexture;
+
+      const previousMode = this._strokePathModes.get(entity.id);
+      let obj = this._strokePaths.get(entity.id);
+      if (obj && previousMode !== undefined && previousMode !== wantTexture) {
+        this.worldContainer.removeChild(obj);
+        obj.destroy(true);
+        obj = null;
+        this._strokePaths.delete(entity.id);
+      }
+
+      const mesh = buildStrokePathMesh(
+        strokePath.points,
+        strokePath.thickness,
+        strokePath.jointMode,
+        strokePath.capMode,
+        wantTexture ? strokePath.textureMode : StrokePathTextureMode.STRETCH,
+        wantTexture ? strokePath.textureTiling : 1,
+        wantTexture ? strokePath.textureScale : 1,
+        wantTexture ? strokePath.textureOffset : 0,
+        wantTexture ? strokePath.textureFlip : false,
+        wantTexture ? strokePath.textureRotation : 0,
+        strokePath.smoothing
+      );
+
+      if (wantTexture) {
+        let texture = resolveTexture(strokePath.textureKey);
+        // Defensive guard against the actual freeze: clearTextureAsset()
+        // (fired by the editor when a sprite asset is deleted) removes the
+        // key from AssetManager's cache AND calls texture.destroy(true) on
+        // the PIXI.Texture/BaseTexture. resolveTexture() re-checking its
+        // cache each tick normally means a deleted key just falls through
+        // to the missing-texture placeholder on the NEXT tick — but the
+        // delete can happen from editor UI code between this System's own
+        // ticks, i.e. after this tick already read a texture reference but
+        // before PIXI's own render pass consumes it, or a texture can be
+        // destroyed while still cached under a stale identity in some
+        // future refactor. Either way, a destroyed BaseTexture has null
+        // internal GL resources: PIXI.SimpleMesh's `.texture` setter and
+        // internal geometry/UV recompute both read `texture.baseTexture`
+        // properties that throw once destroyed, and that throw happens
+        // with no surrounding try/catch anywhere up the call chain to
+        // GameLoop's rAF tick — an uncaught exception there stops
+        // requestAnimationFrame from ever being rescheduled, which is the
+        // full engine freeze. Checking `.valid`/`.destroyed` here and
+        // falling back to the missing-texture marker (itself always a
+        // freshly generated, never-user-deletable texture) makes EVERY
+        // situation — deleted mid-frame, deleted between ticks, or any
+        // other path that could hand this a dead texture — degrade to a
+        // visible magenta placeholder instead of a frozen game.
+        if (!texture || texture.destroyed || (texture.baseTexture && texture.baseTexture.destroyed)) {
+          texture = resolveTexture(null); // missing-texture marker
+        }
+        const meshVertexCount = mesh ? mesh.vertices.length / 2 : 0;
+
+        if (obj && objVertexCount(obj) !== meshVertexCount) {
+          this.worldContainer.removeChild(obj);
+          obj.destroy(true);
+          obj = null;
+          this._strokePaths.delete(entity.id);
+        }
+
+        if (!obj) {
+          const placeholder = mesh || {
+            vertices: new Float32Array([0, 0, 0, 0, 0, 0]),
+            uvs: new Float32Array([0, 0, 0, 0, 0, 0]),
+            indices: new Uint16Array([0, 1, 2]),
+          };
+          obj = new PIXI.SimpleMesh(texture, placeholder.vertices, placeholder.uvs, placeholder.indices);
+          this.worldContainer.addChild(obj);
+          this._strokePaths.set(entity.id, obj);
+        } else {
+          // Guard the assignment itself too: even with the check above,
+          // wrap the actual PIXI call in try/catch as a last line of
+          // defense — some PIXI versions/paths can still throw on edge
+          // cases (a texture destroyed mid-upload, a GL context loss,
+          // etc.) that a simple .destroyed flag check doesn't catch. This
+          // is what makes the fix "check for all situations" rather than
+          // just the one reproduction case: whatever the reason a texture
+          // assignment fails, the StrokePath falls back to the missing
+          // marker and the frame keeps rendering instead of throwing.
+          try {
+            obj.texture = texture;
+          } catch (err) {
+            try {
+              obj.texture = resolveTexture(null);
+            } catch (err2) {
+              // Truly unrecoverable for this object — drop it and let the
+              // next tick rebuild it from scratch via the !obj branch
+              // above, rather than let the exception escape into
+              // GameLoop's rAF tick.
+              this.worldContainer.removeChild(obj);
+              try { obj.destroy(true); } catch (err3) { /* already gone */ }
+              this._strokePaths.delete(entity.id);
+              this._strokePathModes.delete(entity.id);
+              continue;
+            }
+          }
+          if (mesh) {
+            obj.vertices = mesh.vertices;
+            obj.geometry.getBuffer("aTextureCoord").update(mesh.uvs);
+            obj.geometry.getIndex().update(mesh.indices);
+          }
+        }
+
+        if (texture && texture.baseTexture && !texture.baseTexture.destroyed) {
+          texture.baseTexture.wrapMode = strokePath.textureMode === StrokePathTextureMode.TILE
+            ? PIXI.WRAP_MODES.REPEAT
+            : PIXI.WRAP_MODES.CLAMP;
+        }
+        obj.alpha = strokePath.opacity != null ? Math.max(0, Math.min(1, strokePath.opacity)) : 1;
+      } else {
+        if (!obj) {
+          obj = new PIXI.Graphics();
+          this.worldContainer.addChild(obj);
+          this._strokePaths.set(entity.id, obj);
+        }
+
+        obj.clear();
+        obj.alpha = strokePath.opacity != null ? Math.max(0, Math.min(1, strokePath.opacity)) : 1;
+        if (mesh) {
+          const color = _hexToNumber(strokePath.color);
+          obj.lineStyle(0);
+          obj.beginFill(color, 1);
+          for (let i = 0; i < mesh.indices.length; i += 3) {
+            const ia = mesh.indices[i] * 2;
+            const ib = mesh.indices[i + 1] * 2;
+            const ic = mesh.indices[i + 2] * 2;
+            obj.drawPolygon([
+              mesh.vertices[ia], mesh.vertices[ia + 1],
+              mesh.vertices[ib], mesh.vertices[ib + 1],
+              mesh.vertices[ic], mesh.vertices[ic + 1],
+            ]);
+          }
+          obj.endFill();
+        }
+      }
+
+      this._strokePathModes.set(entity.id, wantTexture);
+      obj.x = transform.x;
+      obj.y = transform.y;
+      obj.rotation = (transform.rotation * Math.PI) / 180;
+      obj.scale.set(transform.scaleX, transform.scaleY);
+      obj.zIndex = transform.z + this._tieBreak(entity.id);
+    }
+
+    for (const [entityId, obj] of this._strokePaths) {
+      if (!strokePathSeen.has(entityId)) {
+        this.worldContainer.removeChild(obj);
+        obj.destroy(true);
+        this._strokePaths.delete(entityId);
+        this._strokePathModes.delete(entityId);
       }
     }
 

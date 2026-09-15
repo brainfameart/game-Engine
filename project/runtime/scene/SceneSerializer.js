@@ -12,6 +12,7 @@ import { Transform, TRANSFORM } from "../components/Transform.js";
 import { Camera, CAMERA } from "../components/Camera.js";
 import { SpriteRenderer, SPRITE_RENDERER } from "../components/SpriteRenderer.js";
 import { ShapeRenderer, SHAPE_RENDERER } from "../components/ShapeRenderer.js";
+import { StrokePath, STROKE_PATH } from "../components/StrokePath.js";
 import { TextRenderer, TEXT_RENDERER } from "../components/TextRenderer.js";
 import { SpeechBubble, SPEECH_BUBBLE } from "../components/SpeechBubble.js";
 import { ChatLog, CHAT_LOG } from "../components/ChatLog.js";
@@ -37,6 +38,7 @@ const COMPONENT_REGISTRY = {
   [CAMERA]: Camera,
   [SPRITE_RENDERER]: SpriteRenderer,
   [SHAPE_RENDERER]: ShapeRenderer,
+  [STROKE_PATH]: StrokePath,
   [TEXT_RENDERER]: TextRenderer,
   [SPEECH_BUBBLE]: SpeechBubble,
   [CHAT_LOG]: ChatLog,

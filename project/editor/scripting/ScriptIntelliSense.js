@@ -60,10 +60,12 @@ import { AUDIO_LISTENER } from "../../runtime/components/AudioListener.js";
 import { SPRITE_ANIMATION } from "../../runtime/components/SpriteAnimation.js";
 import { CHARACTER_CONTROLLER, ControllerType } from "../../runtime/components/CharacterController.js";
 import { LIGHT, LightType } from "../../runtime/components/Light.js";
+import { STROKE_PATH, StrokePathJointMode, StrokePathCapMode } from "../../runtime/components/StrokePath.js";
 import { getAllSpriteAssets, getAllAudioAssets } from "../../runtime/assets/AssetRegistry.js";
 import { getSceneList } from "../../runtime/scene/SceneManager.js";
 import { getAllScripts, getScriptSource } from "./ScriptStorage.js";
 import { NAV_API_OPTION_FIELDS } from "../../runtime/scripting/NavAPI.js";
+import { getNamedNavAreas } from "../state/NavAreas.js";
 import {
   BASE_OBJECT_API,
   UNKNOWN_HELPER_API,
@@ -436,6 +438,11 @@ const LIGHT_API_COMMON = [
   { label: "castShadows",    detail: "Enable real-time shadow casting — every ShadowCaster entity blocks this light. Has a rendering cost; leave false until needed (read/write)", insert: "castShadows = ",   kind: "Property" },
   { label: "shadowColor",    detail: 'Shadow tint as a hex string, e.g. "#000000" (black) or "#1a1a3a" (blue-tinted) (read/write)', insert: 'shadowColor = "#',  kind: "Property" },
   { label: "shadowStrength", detail: "Shadow opacity: 0 = no visible shadow, 1 = full-strength. Multiplied with each ShadowCaster's own opacity. Clamped to [0, 1] (read/write)", insert: "shadowStrength = ", kind: "Property" },
+  { label: "flicker", detail: "Enable natural light-source flicker (read/write)", insert: "flicker = ", kind: "Property" },
+  { label: "flickerSpeed", detail: "Flicker speed in cycles per second. 0 = no movement (read/write)", insert: "flickerSpeed = ", kind: "Property" },
+  { label: "flickerDuration", detail: "Flicker duration in seconds. 0 = forever (read/write)", insert: "flickerDuration = ", kind: "Property" },
+  { label: "coreSize", detail: "Bright/hot source-core size from 0.01 (tiny) to 1 (broad) (read/write)", insert: "coreSize = ", kind: "Property" },
+  { label: "coreVisible", detail: "Show the realistic bright/hot light-source core (read/write)", insert: "coreVisible = ", kind: "Property" },
 ];
 // Per-type: only properties actually available for that type are offered so
 // the user never sees radius on a Directional or angle on a Point.
@@ -481,6 +488,37 @@ const COLLIDER_API = [
   { label: "layer", detail: "Physics layer index (read-only)", insert: "layer", kind: "Property" },
   { label: "mask", detail: "Physics layer mask (read-only)", insert: "mask", kind: "Property" },
   { label: "isColliding(other)", detail: "True if currently touching a solid collider — this.collider.isColliding() for 'touching anything', or this.collider.isColliding(other) for a specific entity. Trigger overlaps don't count; use onTriggerEnter/Exit for those.", insert: "isColliding()", kind: "Method" },
+];
+
+// Unlike COLLIDER_API above, every StrokePath member is READ/WRITE from
+// script — see StrokePathAPI.js's header for why (points can be edited
+// live, unlike a Collider's fixed shape settings).
+const STROKE_PATH_API = [
+  { label: "points", detail: "{x,y}[] centerline points, local space, in path order. Reading returns a fresh copy — assign a whole new array back to actually change the path, or use getPoint/setPoint/addPoint/insertPoint/removePoint for single-point edits (read/write)", insert: "points", kind: "Property" },
+  { label: "thickness", detail: "Full strip width (not half-width), world units. Clamped to >= 0 (read/write)", insert: "thickness = ", kind: "Property" },
+  { label: "color", detail: "Flat fill color as a hex string, e.g. \"#8a8a8a\". Ignored when useTexture is true (read/write)", insert: "color = ", kind: "Property" },
+  { label: "opacity", detail: "Overall strip opacity, 0-1. Clamped to [0, 1] (read/write)", insert: "opacity = ", kind: "Property" },
+  { label: "useTexture", detail: "When true the strip is filled with textureKey's image instead of the flat color (read/write)", insert: "useTexture = ", kind: "Property" },
+  { label: "textureKey", detail: "Logical sprite/texture asset key painted along the strip when useTexture is true (read/write)", insert: "textureKey = ", kind: "Property" },
+  { label: "textureMode", detail: "'stretch' | 'tile' — stretch fits the whole image end-to-end; tile repeats at native size using textureTiling (read/write)", insert: "textureMode = ", kind: "Property" },
+  { label: "textureTiling", detail: "TILE mode only: world units of path length one full texture tile covers lengthwise (read/write)", insert: "textureTiling = ", kind: "Property" },
+  { label: "textureScale", detail: "How many times the texture repeats ACROSS the strip's own thickness. 1 = no repeat (read/write)", insert: "textureScale = ", kind: "Property" },
+  { label: "textureOffset", detail: "World-unit shift applied along the path before texture mapping — animate over time for a flowing-river/conveyor-belt look without moving any point (read/write)", insert: "textureOffset = ", kind: "Property" },
+  { label: "textureFlip", detail: "Mirrors the texture across the path's own centerline (read/write)", insert: "textureFlip = ", kind: "Property" },
+  { label: "textureRotation", detail: "Texture rotation in degrees, around each tile's own center (read/write)", insert: "textureRotation = ", kind: "Property" },
+  { label: "jointMode", detail: "'sharp' | 'bevel' | 'round' — how interior joints where two segments meet are drawn (read/write)", insert: "jointMode = ", kind: "Property" },
+  { label: "capMode", detail: "'none' | 'box' | 'round' — how both open ends of the path are drawn (read/write)", insert: "capMode = ", kind: "Property" },
+  { label: "pointCount", detail: "Number of centerline points currently on the path (read-only)", insert: "pointCount", kind: "Property" },
+  { label: "firstPoint", detail: "{x,y} of the path's first point (read-only shortcut for getPoint(0))", insert: "firstPoint", kind: "Property" },
+  { label: "lastPoint", detail: "{x,y} of the path's last point (read-only shortcut for getPoint(pointCount - 1)) — handy for spawning a new point just ahead of the current end", insert: "lastPoint", kind: "Property" },
+  { label: "worldToLocal(x, y)", detail: "Converts a WORLD-space point (e.g. mouse.x/mouse.y) into this entity's local space, the same space points/addPoint/setPoint/insertPoint use. Accounts for position, rotation, and scale.", insert: "worldToLocal(${1:mouse.x}, ${2:mouse.y})", kind: "Method", snippet: true },
+  { label: "localToWorld(x, y)", detail: "The inverse of worldToLocal() — converts one of this path's own local points into world space.", insert: "localToWorld(${1:x}, ${2:y})", kind: "Method", snippet: true },
+  { label: "getLength()", detail: "Total centerline length in world units, following every segment (not straight-line start-to-end distance)", insert: "getLength()", kind: "Method" },
+  { label: "getPoint(index)", detail: "{x,y} of the point at index, or undefined if out of range", insert: "getPoint(${1:0})", kind: "Method", snippet: true },
+  { label: "setPoint(index, x, y)", detail: "Moves the existing point at index to (x, y). No-op if index is out of range", insert: "setPoint(${1:0}, ${2:x}, ${3:y})", kind: "Method", snippet: true },
+  { label: "addPoint(x, y)", detail: "Appends a new point (x, y) to the end of the path", insert: "addPoint(${1:x}, ${2:y})", kind: "Method", snippet: true },
+  { label: "insertPoint(index, x, y)", detail: "Inserts a new point (x, y) at index, shifting later points one slot later — same as clicking a segment with the Path tool", insert: "insertPoint(${1:0}, ${2:x}, ${3:y})", kind: "Method", snippet: true },
+  { label: "removePoint(index)", detail: "Removes the point at index. Refuses to drop the path below 2 points", insert: "removePoint(${1:0})", kind: "Method", snippet: true },
 ];
 
 // Every NavAgent2D member is READ/WRITE from script (unlike
@@ -678,6 +716,9 @@ const NAV_API = [
   { label: "findPath(x1, y1, x2, y2, opts)", detail: "findPath with options. opts = { debug }. `debug` draws the path as green segments in Play view for one frame.", insert: "findPath(${1:x1}, ${2:y1}, ${3:x2}, ${4:y2}, { debug: true })", kind: "Method", snippet: true },
   { label: "isWalkable(x, y)", detail: "True if the world-space point (x,y) falls on a walkable NavWorld2D cell. False for blocked, out-of-bounds, or no NavWorld2D in the scene.", insert: "isWalkable(${1:x}, ${2:y})", kind: "Method", snippet: true },
   { label: "bake()", detail: "Re-bakes the scene's NavWorld2D from every Collider2D currently in the world (same as the Inspector's \"Bake Nav World\" button). Returns { walkable, blocked } cell counts, or null if the scene has no NavWorld2D entity.", insert: "bake()", kind: "Method" },
+  { label: "areaIndex(name)", detail: "Resolves a named NavWorld2D area (see Edit \u2192 Nav Areas\u2026) to its 0-15 slot index. Case-insensitive. Returns -1 if no area has that name.", insert: 'areaIndex("$1")', kind: "Method", snippet: true },
+  { label: "areaMask(...names)", detail: "Turns one or more named areas into the bitmask findPath's `area` option (and NavAgent2D.area) expect \u2014 e.g. nav.findPath(x1, y1, x2, y2, { area: nav.areaMask(\"Ground\", \"Road\") }). Unknown names are skipped; a call where none resolve returns 0 (nothing allowed) rather than silently allowing everything.", insert: 'areaMask("$1")', kind: "Method", snippet: true },
+  { label: "areaCosts({ name: cost })", detail: "Turns a named cost map into the 16-entry array findPath's `areaCosts` option (and NavAgent2D.areaCosts) expect \u2014 e.g. nav.areaCosts({ Water: 3, Mud: 5 }) prefers cheaper areas without forbidding the pricier ones (use areaMask() to forbid outright). A name that doesn't resolve, or a non-positive cost, is skipped rather than failing the whole call.", insert: 'areaCosts({ $1 })', kind: "Method", snippet: true },
 ];
 
 // Properties of a findPath() return value's array items: nav.findPath(...) → { x, y }[] | null
@@ -883,6 +924,17 @@ function _getAudioNames() {
   } catch (_) { return []; }
 }
 
+/** All NAMED (non-empty-slot) NavWorld2D area names, as configured via
+ *  Edit → Nav Areas… — backs nav.areaIndex("/nav.areaMask(" completion.
+ *  Sorted by slot index (not alphabetically) so the list order matches
+ *  what the Nav Areas window and Inspector's area checklist already
+ *  show, rather than surprising the user with a different order here. */
+function _getNavAreaNames() {
+  try {
+    return getNamedNavAreas().map((a) => a.name);
+  } catch (_) { return []; }
+}
+
 /** Animation clip names for the context entities (animator.play completions). */
 function _getAnimClipNames() {
   const entities = _getContextEntities();
@@ -1022,7 +1074,7 @@ function _isInsideOnMessageBody(textUntilPosition) {
 //
 // Patterns are ordered from most-specific to least-specific so the first
 // match wins.
-function _detectStringContext(lineUntil, textUntilPosition) {
+export function _detectStringContext(lineUntil, textUntilPosition) {
   // Each pattern matches the opening quote followed by zero or more characters
   // that are not a closing quote — so completions keep working as the user
   // types partial text inside the string (not just immediately after the quote).
@@ -1065,6 +1117,15 @@ function _detectStringContext(lineUntil, textUntilPosition) {
 
   // .texture = " or .texture = '
   if (new RegExp(`\\.texture\\s*=\\s*${q}$`).test(lineUntil)) return "textureName";
+
+  // nav.areaIndex(" — single named NavWorld2D area (see NavAPI.js's
+  // resolveNavAreaIndex and Edit → Nav Areas… for where names come from)
+  if (new RegExp(`\\bnav\\s*\\.\\s*areaIndex\\s*\\(\\s*${q}$`).test(lineUntil)) return "navAreaName";
+
+  // nav.areaMask(" or nav.areaMask("Ground", " — one or more named areas,
+  // comma-separated; matches both the first argument and any later one
+  // after a comma so completions keep working as the user adds more names.
+  if (new RegExp(`\\bnav\\s*\\.\\s*areaMask\\s*\\(\\s*(?:${q}["']\\s*,\\s*)*${q}$`).test(lineUntil)) return "navAreaName";
 
   // sendMessage(tag, ...) — first argument is a tag
   if (new RegExp(`\\bsendMessage\\s*\\(\\s*${q}$`).test(lineUntil)) return "entityTag";
@@ -1137,6 +1198,7 @@ const COMPONENT_KEY_NAMES = [
   { label: "Collider2D", detail: "Collider component" },
   { label: "Controller", detail: "Character controller component (any controller type)" },
   { label: "Light", detail: "Light component (any light type)" },
+  { label: "StrokePath", detail: "Stroke path component" },
 ];
 
 // ─── Whole-document diagnostics (typo squiggles) ──────────────────────────────
@@ -1445,7 +1507,7 @@ export function refreshScriptDiagnostics(monaco, model) {
     monaco.editor.setModelMarkers(model, DIAGNOSTIC_OWNER, markers);
   } catch (e) {
     // Never let a diagnostics bug break the editor itself.
-    console.warn("[ZenEngine IntelliSense] diagnostics pass failed:", e);
+    console.warn("[Vaelis IntelliSense] diagnostics pass failed:", e);
   }
 }
 
@@ -1602,7 +1664,7 @@ export function _navOptionCompletionItems(monaco, optionName) {
   });
 }
 
-function _isInsideFunctionOptArg(text, funcPattern) {
+export function _isInsideFunctionOptArg(text, funcPattern) {
   const callRx = new RegExp(funcPattern.source, "g");
   let lastIdx = -1;
   let m;
@@ -1942,6 +2004,7 @@ const COMPONENT_APIS = [
   { key: COLLIDER_2D, name: "collider", api: COLLIDER_API },
   { key: NAV_AGENT_2D, name: "navAgent", api: NAV_AGENT_API },
   { key: LIGHT, name: "light", api: LIGHT_API },
+  { key: STROKE_PATH, name: "strokePath", api: STROKE_PATH_API },
 ];
 
 // ─── Object-literal { } field completions ────────────────────────────────────
@@ -2187,7 +2250,7 @@ export function registerIntelliSense(monaco) {
       try {
         return _provideCompletionItemsImpl(monaco, model, position);
       } catch (e) {
-        console.warn("[ZenEngine IntelliSense] completion pass failed:", e);
+        console.warn("[Vaelis IntelliSense] completion pass failed:", e);
         return { suggestions: [] };
       }
     },
@@ -2278,6 +2341,16 @@ function _provideCompletionItemsImpl(monaco, model, position) {
           return { suggestions };
         }
 
+        if (stringCtx === "navAreaName") {
+          const areas = _getNavAreaNames();
+          for (const name of areas) {
+            suggestions.push(_makeValueCompletion(
+              monaco, name, "NavWorld2D area (Edit \u2192 Nav Areas\u2026)", name + '"', range, hasClosingQuote
+            ));
+          }
+          return { suggestions };
+        }
+
         if (stringCtx === "clipName") {
           const clips = _getAnimClipNames();
           for (const name of clips) {
@@ -2365,6 +2438,26 @@ function _provideCompletionItemsImpl(monaco, model, position) {
         for (const item of SPAWN_OPTS_API) {
           if (usedKeys.has(item.label)) continue;
           suggestions.push(_makeCompletion(monaco, item, range));
+        }
+        return { suggestions };
+      }
+
+      // ── nav.areaCosts({ <partial> → NAMED area keys (Ground: 3, ...) ─────
+      // Unlike the fixed-field opts above, this object's keys are the
+      // project's own Nav Areas names, not a static API shape — see
+      // Edit → Nav Areas… (editor/state/NavAreas.js) and
+      // NavAPI.js's resolveNavAreaCosts for how each key resolves.
+      if (_isInsideFunctionOptArg(textUntilPosition, /\bnav\s*\.\s*areaCosts\s*\(/)) {
+        const usedKeys = _usedObjectKeys(textUntilPosition);
+        for (const name of _getNavAreaNames()) {
+          if (usedKeys.has(name)) continue;
+          suggestions.push(_makeCompletion(monaco, {
+            label: name,
+            detail: "NavWorld2D area (Edit \u2192 Nav Areas\u2026) \u2014 cost multiplier, e.g. 0.5 (prefer) to 5+ (avoid).",
+            insert: name + ": ${1:1}",
+            kind: "Property",
+            snippet: true,
+          }, range));
         }
         return { suggestions };
       }
@@ -2530,6 +2623,9 @@ function _provideCompletionItemsImpl(monaco, model, position) {
           isKnownSubObj = true;
           // Use type-aware API: only show properties valid for this light type.
           if (!keys || keys.has(LIGHT)) items = _lightApiForEntities(contextEntities);
+        } else if (subObj === "strokePath") {
+          isKnownSubObj = true;
+          if (!keys || keys.has(STROKE_PATH)) items = STROKE_PATH_API;
         } else if (subObj === "scene") {
           isKnownSubObj = true;
           items = SCENE_API;
@@ -2834,6 +2930,7 @@ function _buildHoverIndex() {
     collider: "Collider 2D",
     navAgent: "Nav Agent 2D",
     light: "Light",
+    strokePath: "Stroke Path",
   };
   for (const c of COMPONENT_APIS) {
     const componentName = COMPONENT_DISPLAY_NAMES[c.name];
@@ -2877,6 +2974,7 @@ function _buildHoverIndex() {
     ["light", LIGHT_API],
     ["collider", COLLIDER_API],
     ["navAgent", NAV_AGENT_API],
+    ["strokePath", STROKE_PATH_API],
     ["global", GLOBAL_APIS],
     ["save", SAVE_API],
     ["scene", SCENE_API],
@@ -2934,7 +3032,7 @@ function registerHoverProvider(monaco) {
           contents,
         };
       } catch (e) {
-        console.warn("[ZenEngine IntelliSense] hover pass failed:", e);
+        console.warn("[Vaelis IntelliSense] hover pass failed:", e);
         return null;
       }
     },

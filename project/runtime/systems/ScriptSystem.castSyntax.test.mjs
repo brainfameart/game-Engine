@@ -46,3 +46,32 @@ const sys = new ScriptSystem(/* scriptApi stub */ {});
 }
 
 console.log("PASS ScriptSystem `as` cast syntax compiles instead of throwing a SyntaxError");
+
+
+// Bare smoothstep() is a supported gameplay helper. It must be available to
+// legacy/user scripts because the NavCar workflow uses it directly.
+{
+  const factory = sys._compile(
+    "SmoothstepGlobalTest",
+    "function onUpdate() { this.v = smoothstep(0, 10, 5); this.w = mathx.smoothstep(0, 10, 5); }"
+  );
+  assert.equal(typeof factory, "function", "smoothstep helper script must compile");
+  const handlers = factory(
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    { smoothstep: function (a, b, value) {
+      const t = Math.max(0, Math.min(1, (value - a) / (b - a)));
+      return t * t * (3 - 2 * t);
+    } }, // mathx
+    function (a, b, value) {
+      const t = Math.max(0, Math.min(1, (value - a) / (b - a)));
+      return t * t * (3 - 2 * t);
+    }, // smoothstep
+    undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+    console, Math, {}
+  );
+  const ctx = {};
+  handlers.onUpdate.call(ctx);
+  assert.equal(ctx.v, 0.5, "bare smoothstep() must be exposed to scripts");
+  assert.equal(ctx.w, 0.5, "mathx.smoothstep() must match the bare helper");
+}

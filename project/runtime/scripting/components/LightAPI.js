@@ -38,7 +38,7 @@ function _requireLight(entity) {
 const LIGHT_MEMBERS = new Set([
   "type", "color", "intensity", "radius", "angle",
   "width", "height", "castsOnWorld", "castShadows",
-  "shadowColor", "shadowStrength",
+  "shadowColor", "shadowStrength", "flicker", "flickerSpeed", "flickerDuration", "coreSize", "coreVisible",
 ]);
 
 // Properties valid per light type. Shared across all: type, color, intensity,
@@ -46,27 +46,27 @@ const LIGHT_MEMBERS = new Set([
 const LIGHT_TYPE_MEMBERS = {
   [LightType.DIRECTIONAL]: new Set([
     "type", "color", "intensity",
-    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength",
+    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength", "flicker", "flickerSpeed", "flickerDuration", "coreSize", "coreVisible",
   ]),
   [LightType.POINT]: new Set([
     "type", "color", "intensity", "radius",
-    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength",
+    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength", "flicker", "flickerSpeed", "flickerDuration", "coreSize", "coreVisible",
   ]),
   [LightType.SPOT]: new Set([
     "type", "color", "intensity", "radius", "angle",
-    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength",
+    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength", "flicker", "flickerSpeed", "flickerDuration", "coreSize", "coreVisible",
   ]),
   [LightType.AREA]: new Set([
     "type", "color", "intensity", "radius", "width", "height",
-    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength",
+    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength", "flicker", "flickerSpeed", "flickerDuration", "coreSize", "coreVisible",
   ]),
   [LightType.GOD_RAYS]: new Set([
     "type", "color", "intensity", "radius", "angle",
-    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength",
+    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength", "flicker", "flickerSpeed", "flickerDuration", "coreSize", "coreVisible",
   ]),
   [LightType.FREEFORM]: new Set([
     "type", "color", "intensity",
-    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength",
+    "castsOnWorld", "castShadows", "shadowColor", "shadowStrength", "flicker", "flickerSpeed", "flickerDuration", "coreSize", "coreVisible",
   ]),
 };
 
@@ -156,6 +156,17 @@ export function createLightAPI(entity) {
      */
     get shadowStrength() { return _requireLight(entity).shadowStrength; },
     set shadowStrength(v) { _requireLight(entity).shadowStrength = Math.max(0, Math.min(1, v)); },
+
+    get flicker() { return _requireLight(entity).flicker; },
+    set flicker(v) { _requireLight(entity).flicker = !!v; },
+    get flickerSpeed() { return _requireLight(entity).flickerSpeed; },
+    set flickerSpeed(v) { _requireLight(entity).flickerSpeed = Math.max(0, v); },
+    get flickerDuration() { return _requireLight(entity).flickerDuration; },
+    set flickerDuration(v) { _requireLight(entity).flickerDuration = Math.max(0, v); },
+    get coreSize() { return _requireLight(entity).coreSize; },
+    set coreSize(v) { _requireLight(entity).coreSize = Math.max(0.01, Math.min(1, v)); },
+    get coreVisible() { return _requireLight(entity).coreVisible; },
+    set coreVisible(v) { _requireLight(entity).coreVisible = !!v; },
   };
 
   return new Proxy(target, {

@@ -681,9 +681,30 @@ export class ControllerSystem extends System {
     }
 
     if (state.mode === 'forward' && absForward >= REVERSE_ENTER_ANGLE) {
-      state.mode = (Number(currentSpeed) || 0) > REVERSE_MIN_SPEED ? 'brakeForReverse' : 'reverseAlign';
-      state.turnSignLocked = true;
-      state.reverseTime = 0;
+      // Do not reverse merely because the target is behind the car. Estimate
+      // both maneuvers first. A distant target is usually better handled by
+      // a normal forward U-turn; a close target in a constrained space is
+      // where a committed reverse maneuver actually saves time.
+      const turnRate = Math.max(0.85, Number(controller.turnSpeed) || 2.4) * Math.PI / 180;
+      const forwardTurnTime = absForward / turnRate;
+      const reverseTurnTime = 0.55 + Math.max(0, (absForward - Math.PI * 0.5)) / Math.max(1.2, turnRate * 1.35);
+      const brakeTime = absSpeed > REVERSE_MIN_SPEED
+        ? absSpeed / Math.max(40, Number(controller.brakeForce) || 360)
+        : 0;
+      const closeEnoughToReverse = distance <= Math.max(100, absSpeed * 0.95, Number(controller.maxSpeed) * 0.28);
+      const reverseIsFaster = (reverseTurnTime + brakeTime + 0.12) < (forwardTurnTime * 0.82);
+
+      if (closeEnoughToReverse && reverseIsFaster) {
+        state.mode = absSpeed > REVERSE_MIN_SPEED ? 'brakeForReverse' : 'reverseAlign';
+        state.turnSignLocked = true;
+        state.reverseTime = 0;
+      } else {
+        // Keep driving forward and let the normal steering system make the
+        // U-turn. This prevents long-range targets from causing unnecessary
+        // backing-up behavior.
+        state.mode = 'forward';
+        state.turnSignLocked = false;
+      }
     }
 
     if (state.mode === 'brakeForReverse') {

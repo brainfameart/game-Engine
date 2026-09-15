@@ -47,7 +47,7 @@
         // over plain http on a non-localhost host) is swallowed — it
         // only means no install prompt is offered, never a broken app.
         window.addEventListener('load', () => {
-            navigator.serviceWorker.register('/sw.js').catch(() => { /* no offline/installability support this session */ });
+            navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' }).catch(() => { /* no offline/installability support this session */ });
         });
     }
 

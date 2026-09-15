@@ -88,6 +88,11 @@ export class Light {
     castShadows = false,
     shadowColor = "#000000",
     shadowStrength = 1,
+    flicker = false,
+    flickerSpeed = 8,
+    flickerDuration = 0,
+    coreSize = 0.22,
+    coreVisible = true,
     points = null,
   } = {}) {
     this.type = type;
@@ -151,6 +156,17 @@ export class Light {
     // between a light's own Shadow Strength and a renderer's shadow
     // contribution.
     this.shadowStrength = shadowStrength;
+
+    // Optional natural-looking source flicker. Speed is cycles/second;
+    // duration is seconds, with 0 meaning flicker forever.
+    this.flicker = !!flicker;
+    this.flickerSpeed = Math.max(0, flickerSpeed);
+    this.flickerDuration = Math.max(0, flickerDuration);
+
+    // Size of the bright/hot source core as a fraction of the light's
+    // natural source area. 0 = tiny core, 1 = broad core.
+    this.coreSize = Math.max(0.01, Math.min(1, coreSize));
+    this.coreVisible = !!coreVisible;
 
     // Freeform only: an editable polygon outline, drawn by hand in the
     // Scene view (see editor/viewport/LightGizmo.js's vertex-drag

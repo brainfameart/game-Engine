@@ -61,6 +61,7 @@ import { CAMERA } from "../components/Camera.js";
 import { AUDIO_SOURCE } from "../components/AudioSource.js";
 import { AUDIO_LISTENER } from "../components/AudioListener.js";
 import { NAV_AGENT_2D } from "../components/NavAgent2D.js";
+import { resolveNavAreaIndex, resolveNavAreaMask, resolveNavAreaCosts } from "./NavAPI.js";
 import { CHARACTER_CONTROLLER, ControllerType } from "../components/CharacterController.js";
 import { cloneEntity } from "../scene/SceneSerializer.js";
 import { createTransformAPI } from "./components/TransformAPI.js";
@@ -81,6 +82,8 @@ import { createColliderAPI } from "./components/ColliderAPI.js";
 import { createNavAgentAPI } from "./components/NavAgentAPI.js";
 import { LIGHT } from "../components/Light.js";
 import { createLightAPI } from "./components/LightAPI.js";
+import { STROKE_PATH } from "../components/StrokePath.js";
+import { createStrokePathAPI } from "./components/StrokePathAPI.js";
 import { createStateAPI } from "./components/StateAPI.js";
 import { createTouchTrackAPI } from "./components/TouchTrackAPI.js";
 import { createSaveAPI } from "./components/SaveAPI.js";
@@ -601,8 +604,9 @@ class EntityContext {
    * NPC behave like a chase-car — pathing around obstacles like a nav
    * agent, but handling like a car while it does it.
    *
-   * DELIBERATELY HAS NO "no path found" straight-line fallback, same
-   * reasoning as navMoveToward() — see that method's doc comment.
+   * If navigation is temporarily unavailable (for example while the
+   * navigation map is synchronizing), the method uses a short-lived direct
+   * drive fallback and retries pathfinding on the next scheduled repath.
    *
    * @param {number} targetX @param {number} targetY world-space goal
    * @param {number} [speed] px/sec top speed for this call — defaults to
@@ -643,6 +647,19 @@ class EntityContext {
         targetVX: 0,
         targetVY: 0,
         hasRawTarget: false,
+        // Sticky "have we actually stopped at THIS target" latch — see
+        // its use below, right after the waypoint-arrival check. Without
+        // this, a car that settles just outside finalArriveDist (normal
+        // physics drift/friction after simulateDrive(0,0) — zero throttle
+        // doesn't mean zero velocity) falls back into the full driving
+        // branch on the very next call and re-throttles, which is what
+        // made "Stopping Distance" look like it was being ignored: the
+        // car would creep/bump near the target instead of cleanly
+        // stopping. Cleared only when the target itself moves far enough
+        // to count as a new destination (see arrivedTargetX/Y below).
+        arrived: false,
+        arrivedTargetX: 0,
+        arrivedTargetY: 0,
       };
     }
     var state = this._navDriveState;
@@ -709,6 +726,26 @@ class EntityContext {
     var agentRadius = navAgent.radius;
     var agentArea = navAgent.area;
 
+    // Arrived latch: once this car has come to rest at a target, stay
+    // stopped and skip driving entirely until the TARGET moves far enough
+    // to count as a new destination — not merely until the car's own
+    // position drifts a few pixels from friction. This is what makes
+    // Stopping Distance actually hold: without it, settling just outside
+    // finalArriveDist on one frame (normal physics drift after throttle
+    // hits zero) would fall through to the full drive branch below and
+    // re-throttle toward the target, over and over, instead of staying
+    // stopped. Checked against this call's resolved targetX/targetY
+    // (already collab-slotted above if collabEnabled), so a group-surround
+    // car correctly wakes back up if its assigned ring slot shifts even
+    // while the shared group target hasn't moved.
+    var arrivedTargetMoved = !state.arrived ||
+      Math.hypot(targetX - state.arrivedTargetX, targetY - state.arrivedTargetY) > Math.max(finalArriveDist, targetChangeDistance);
+    if (state.arrived && !arrivedTargetMoved) {
+      this.controller.simulateDrive(0, 0);
+      return true;
+    }
+    if (arrivedTargetMoved) state.arrived = false;
+
     state.repathTimer -= dt;
     var targetMoved = !state.path || Math.hypot(targetX - state.plannedX, targetY - state.plannedY) > targetChangeDistance;
     var shouldRepath = !state.path || targetMoved || (autoRepath && state.repathTimer <= 0);
@@ -732,12 +769,29 @@ class EntityContext {
           state.plannedX = Infinity;
           state.plannedY = Infinity;
         } else {
+          // A car must never become permanently dead just because the nav
+          // query temporarily has no route (for example while a NavWorld is
+          // rebuilding, the target is outside the baked area, or a moving
+          // target prediction lands one frame outside the corridor).
+          // Keep the NavCar alive by handing the real goal to the same
+          // human-driver resolver used by direct chase cars. The next call
+          // will retry the navigation query automatically.
           state.path = null;
           state.index = 0;
-          this.controller.simulateDrive(0, 0);
-          return false;
+          state.repathTimer = 0;
+          this.controller.simulateDriveToward(targetX, targetY);
+          return true;
         }
       } else {
+        // Vehicle paths get a second, conservative post-process. A* grid
+        // paths can contain many tiny left/right cells even when the actual
+        // road is one continuous bend. Cars should follow the route corridor,
+        // not every grid vertex. Only shortcuts whose sampled points remain
+        // walkable for THIS car are accepted, so this cannot cut through a
+        // forbidden area or leave a narrow road.
+        freshPath = this._navCarSimplifyPath(
+          freshPath, agentRadius, agentArea, navAgent ? navAgent.areaCosts : null
+        );
         state.path = freshPath;
         state.index = 0;
         state.plannedX = targetX;
@@ -755,28 +809,86 @@ class EntityContext {
       stuckTime: 0,
       recoveryTimer: 0,
       recoverySign: 1,
+      recoveryPhase: 'back', // 'back' (reversing away, straight, no steer)
+                              // or 'face' (stopped/creeping, pivoting to
+                              // point at the target/opening before the
+                              // normal drive loop is allowed to resume) —
+                              // see the recovery state machine below.
+      recoveryBackDist: 0,   // distance actually covered so far in the
+                              // current 'back' phase, compared against
+                              // recoveryBackTarget to decide when to
+                              // switch to 'face'.
+      recoveryBackTarget: 0, // how far this recovery plan wants to back up
+                              // before facing/resuming — longer when the
+                              // plan combines reverse+turn (see below).
       obstacleTime: 0,
+      offPathTime: 0,
+      routeHeadingX: 0,
+      routeHeadingY: -1,
       lastX: this.x,
       lastY: this.y,
       lastProgressTimer: 0,
       lastPathIndex: state.index,
     });
 
-    var waypointThreshold = Math.max(arriveDist, baseSpeed * dt + 0.25);
+    // Advance by ROUTE PROGRESS, not just a circular distance test. A car can
+    // legitimately pass close to a corner while still approaching it from
+    // the wrong side; blindly advancing then makes the next waypoint appear
+    // behind the car and can trigger a needless reverse/steering flip. We
+    // therefore require either (a) the car is close enough to the waypoint,
+    // or (b) it has crossed the waypoint along the incoming route direction.
+    // This makes waypoint consumption monotonic and is especially important
+    // on zig-zag road nav layers.
+    var waypointThreshold = Math.max(arriveDist, Math.min(18, baseSpeed * dt * 2.5 + 0.25));
     while (state.index < lastIndex) {
       waypoint = path[state.index];
       distanceToWaypoint = Math.hypot(waypoint.x - this.x, waypoint.y - this.y);
-      if (distanceToWaypoint > waypointThreshold) break;
+      var incoming = state.index > 0 ? path[state.index - 1] : null;
+      var crossed = false;
+      if (incoming) {
+        var ix = waypoint.x - incoming.x;
+        var iy = waypoint.y - incoming.y;
+        var ilen = Math.hypot(ix, iy);
+        if (ilen > 1e-5) {
+          // Positive means the vehicle has moved beyond the waypoint in the
+          // direction the route arrived from. A small tolerance prevents
+          // jitter around the exact corner.
+          var past = (this.x - waypoint.x) * ix + (this.y - waypoint.y) * iy;
+          crossed = past > Math.max(4, ilen * 0.08);
+        }
+      }
+      if (distanceToWaypoint > waypointThreshold && !crossed) break;
       state.index++;
     }
     waypoint = path[state.index];
     distanceToWaypoint = Math.hypot(waypoint.x - this.x, waypoint.y - this.y);
 
-    if (state.index === lastIndex && distanceToWaypoint <= finalArriveDist) {
+    // Arrival is measured against the ACTUAL destination (targetX/targetY),
+    // not just "am I on the last waypoint AND close to it". Those two used
+    // to be required together, but a late obstacle parked at/near the goal
+    // (see _navCarScanObstacles below) steers the aim point laterally to
+    // dodge it — which can keep distanceToWaypoint just outside
+    // finalArriveDist indefinitely, or keep the waypoint-advance loop above
+    // from ever promoting state.index to lastIndex, so the car circles the
+    // obstacle at speed near its destination instead of ever being allowed
+    // to stop. A car that is genuinely within finalArriveDist of the real
+    // target should stop, full stop, regardless of which waypoint index the
+    // avoidance detour currently has it on.
+    var distanceToTarget = Math.hypot(targetX - this.x, targetY - this.y);
+    if (distanceToTarget <= finalArriveDist) {
       this.controller.simulateDrive(0, 0);
       vehicleState.steer = 0;
       vehicleState.desiredSpeed = 0;
       vehicleState.stuckTime = 0;
+      // Latch "arrived" for THIS target so the next call short-circuits at
+      // the arrivedTargetMoved check earlier in this function instead of
+      // re-entering the full drive/braking pipeline — that re-entry (after
+      // ordinary physics drift carried the car a hair past finalArriveDist
+      // again) was the actual source of the "stopping distance doesn't
+      // work" creep/bump-in-place behavior.
+      state.arrived = true;
+      state.arrivedTargetX = targetX;
+      state.arrivedTargetY = targetY;
       return true;
     }
 
@@ -815,13 +927,34 @@ class EntityContext {
     var aimDirX = (aimX - this.x) / Math.max(1e-5, distToAim);
     var aimDirY = (aimY - this.y) / Math.max(1e-5, distToAim);
     if (Number.isFinite(preview.tangentX) && Number.isFinite(preview.tangentY) && (Math.abs(preview.tangentX) + Math.abs(preview.tangentY) > 0.001)) {
-      const tangentBlend = preview.tangentBlend !== undefined ? Math.max(0, Math.min(1, preview.tangentBlend)) : 0.75;
+      const tangentBlend = preview.tangentBlend !== undefined ? Math.max(0, Math.min(1, preview.tangentBlend)) : 0;
       aimDirX = aimDirX * (1 - tangentBlend) + preview.tangentX * tangentBlend;
       aimDirY = aimDirY * (1 - tangentBlend) + preview.tangentY * tangentBlend;
       const tangentLen = Math.hypot(aimDirX, aimDirY);
       if (tangentLen > 1e-5) { aimDirX /= tangentLen; aimDirY /= tangentLen; }
     }
+    // Until the vehicle reaches the dedicated turn-activation gate, keep the
+    // steering vector locked to the CURRENT incoming road edge.  This is the
+    // key anti-hunting rule: being near a future corner must not make the car
+    // nibble toward that corner early and then correct back.  Once the gate is
+    // reached, _navCarPathPreview() gradually introduces the next-edge tangent.
+    if (Number.isFinite(preview.cornerDistance) && preview.cornerDistance < Infinity &&
+        Number.isFinite(preview.cornerIncomingLength) && preview.cornerIncomingLength > 1e-5 &&
+        preview.cornerIndex === state.index && preview.cornerTurnGate <= 0) {
+      var prevPoint = state.index > 0 ? path[state.index - 1] : null;
+      var currPoint = state.index < path.length ? path[state.index] : null;
+      if (prevPoint && currPoint) {
+        var routeDX = Number(currPoint.x) - Number(prevPoint.x);
+        var routeDY = Number(currPoint.y) - Number(prevPoint.y);
+        var routeLen = Math.hypot(routeDX, routeDY);
+        if (routeLen > 1e-5) {
+          aimDirX = routeDX / routeLen;
+          aimDirY = routeDY / routeLen;
+        }
+      }
+    }
     var steered = this._applyNavAvoidance(navAgent, agentRadius, aimDirX, aimDirY);
+
 
     // Local physics scan: dynamic/late obstacles can exist after the last
     // Nav bake. Pick the clearer side and request a faster repath if one
@@ -837,6 +970,12 @@ class EntityContext {
     } else {
       vehicleState.obstacleTime = Math.max(0, vehicleState.obstacleTime - dt * 2);
     }
+
+    // Predictive traffic: anticipates other NavCars/agents by their actual
+    // velocity, ahead of when a raw raycast would hit them. See
+    // _navCarTrafficScan()'s doc comment for the following-distance/
+    // closing-speed/yield-by-priority behaviors this adds.
+    var traffic = this._navCarTrafficScan(navAgent, agentRadius, actualSpeed, aimDirX, aimDirY);
 
     if (Math.abs(obstacle.steer) > 0.001) {
       // Lateral avoidance vector around the obstacle, blended with route
@@ -860,11 +999,16 @@ class EntityContext {
     const wheelBaseLike = Math.max(20, Math.min(140, lookahead * 0.55));
     const curvature = (2 * Math.sin(angleError)) / Math.max(1, wheelBaseLike);
     let desiredSteer = Math.max(-1, Math.min(1, curvature * 85));
-    desiredSteer += Math.max(-0.35, Math.min(0.35, obstacle.steer * 0.55));
+    desiredSteer += Math.max(-0.30, Math.min(0.30, obstacle.steer * 0.48));
 
-    // A tiny heading stabilization term reduces the robotic “hunt” along
-    // successive grid cells without freezing steering near a real corner.
-    desiredSteer += Math.max(-0.15, Math.min(0.15, Math.sin(angleError) * 0.12));
+    // Cars should not chase every tiny navigation-cell direction change.
+    // Keep a small steering deadband on straight sections and add a little
+    // directional hysteresis so the wheel does not hunt left/right around 0.
+    desiredSteer += Math.max(-0.10, Math.min(0.10, Math.sin(angleError) * 0.10));
+    if (Math.abs(desiredSteer) < 0.075) desiredSteer = 0;
+    const previousSteer = Number(vehicleState.steer) || 0;
+    if (previousSteer > 0.16 && desiredSteer < 0.04 && desiredSteer > -0.10) desiredSteer = 0.02;
+    if (previousSteer < -0.16 && desiredSteer > -0.04 && desiredSteer < 0.10) desiredSteer = -0.02;
     desiredSteer = Math.max(-1, Math.min(1, desiredSteer));
     vehicleState.steer = this._navCarSmoothSignal(
       Number(vehicleState.steer) || 0,
@@ -880,26 +1024,88 @@ class EntityContext {
     const cornerFactor = 1 - cornerSeverity * (1 - (Number(navAgent.vehicleCornerSlowdown) || 0.72));
     const headingFactor = 0.25 + 0.75 * Math.max(0, Math.cos(angleError));
     const obstacleFactor = 1 - Math.max(0, Math.min(0.92, obstacle.brake * (Number(navAgent.vehicleObstacleBrake) || 0.9)));
+    // Narrow corridors need a lower speed even before the center ray says
+    // “blocked”. This gives the driver room to make small corrections rather
+    // than entering a tight gap at full speed.
+    const usableClearance = Math.min(obstacle.leftClear, obstacle.rightClear);
+    const narrowLimit = Math.max(agentRadius * 2.2, (Number(navAgent.vehicleObstacleWidth) || 28) * 1.8);
+    const narrowFactor = usableClearance < narrowLimit
+      ? Math.max(0.30, usableClearance / Math.max(1, narrowLimit))
+      : 1;
 
     // Use a physically meaningful stopping-distance estimate. The car starts
     // braking before a final point or hard corner instead of discovering the
     // need for braking after it has already passed the turn.
     const brakeAccel = Math.max(40, Number(carComponent?.brakeForce) || Number(navAgent.deceleration) || 1000);
     const stoppingDistance = (actualSpeed * actualSpeed) / (2 * brakeAccel);
-    const cornerBrakeWindow = Math.max(18, Number(navAgent.vehicleCornerLookahead) || 110);
-    const arrivalFactor = state.index === lastIndex
-      ? Math.max(0.05, Math.min(1, (distanceToWaypoint - finalArriveDist) / Math.max(1, stoppingDistance * 1.4 + finalArriveDist)))
+    // Gate on real distance to the destination (distanceToTarget), not on
+    // state.index === lastIndex. An obstacle parked near the goal can keep
+    // the avoidance detour on an earlier waypoint index right up until the
+    // car is already on top of the target — gating braking on the index
+    // meant the car approached that final stretch at full/near-full speed
+    // instead of decelerating in, which is what let it overshoot into a
+    // circling pattern around the destination instead of settling.
+    const arrivalFactor = distanceToTarget <= Math.max(finalArriveDist, stoppingDistance * 1.4 + finalArriveDist) * 1.5
+      ? Math.max(0.05, Math.min(1, (distanceToTarget - finalArriveDist) / Math.max(1, stoppingDistance * 1.4 + finalArriveDist)))
       : 1;
-    const cornerDistance = Number.isFinite(preview.cornerDistance) ? preview.cornerDistance : cornerBrakeWindow;
-    const cornerBraking = cornerDistance < cornerBrakeWindow
-      ? Math.max(0.25, 1 - cornerSeverity * Math.max(0, 1 - cornerDistance / cornerBrakeWindow))
-      : 1;
+
+    // Long-range braking lookahead: scans well beyond the short steering
+    // window to catch every corner a real driver would already be
+    // planning for, including a run of several close corners (zigzag/
+    // S-curve road) treated as one continuous braking problem rather than
+    // each bend only being discovered once it's the nearest waypoint.
+    //
+    // The scan distance is sized from this car's MAX speed and braking
+    // power, not its current speed. Sizing it from current speed was the
+    // original bug here: right after a stop or a previous corner the car
+    // is still accelerating, so its current-speed stopping distance is
+    // small — meaning the scan window stayed short exactly while the car
+    // was speeding up down a straight, so it only "saw" an upcoming curve
+    // once already close to cruising speed, by which point the curve
+    // could already be near. Sizing from maxSpeed instead means the car
+    // always looks as far ahead as it could EVER need to brake from,
+    // whether it happens to be at that speed yet or not — a driver plans
+    // for the speed they're headed toward on a straight, not just the
+    // speed they're at right this instant.
+    const maxStoppingDistance = (maxSpeed * maxSpeed) / (2 * brakeAccel);
+    const brakeScanRange = Math.max(
+      Number(navAgent.vehicleCornerLookahead) || 110,
+      maxStoppingDistance * 1.6 + agentRadius * 4
+    );
+    const brakingLookahead = this._navCarBrakingLookahead(
+      path, state.index, this.x, this.y, brakeScanRange, brakeAccel, maxSpeed
+    );
+    // How much of the requested speed this car is allowed given everything
+    // ahead within brakeScanRange — 1 when nothing ahead needs braking for
+    // (clear/straight road, free to approach maxSpeed), shrinking toward 0
+    // for a hairpin bend that's coming up soon.
+    const cornerBraking = maxSpeed > 0 ? Math.max(0.15, brakingLookahead.targetSpeed / maxSpeed) : 1;
+
+    // Predictive traffic factor: anticipated closing speed toward another
+    // moving NavCar/agent brakes proportionally, same as obstacleFactor
+    // does for raycast hits — but this fires BEFORE a ray would ever touch
+    // the other car, since it is driven by trajectories, not proximity
+    // alone. A forced yield (lower-priority car crossing a higher-priority
+    // one's path) clamps harder than a plain brake amount would, so an
+    // intersection conflict reads as a deliberate stop/hold rather than
+    // just "traffic slowed me down a bit".
+    const trafficFactor = traffic.yield
+      ? Math.max(0.08, 1 - Math.max(0.75, traffic.brake))
+      : 1 - Math.max(0, Math.min(0.92, traffic.brake));
 
     let targetSpeed = requestedSpeed;
     targetSpeed = Math.min(targetSpeed, maxSpeed * (0.18 + 0.82 * headingFactor));
     targetSpeed = Math.min(targetSpeed, maxSpeed * cornerFactor);
-    targetSpeed *= Math.max(0.22, cornerBraking);
+    targetSpeed = Math.min(targetSpeed, maxSpeed * cornerBraking);
     targetSpeed *= obstacleFactor;
+    targetSpeed *= narrowFactor;
+    targetSpeed *= trafficFactor;
+    // Following a lead car: never target faster than the lead car's own
+    // speed (a small undercut keeps a natural gap instead of the two cars
+    // drifting into exact lockstep and occasionally kissing bumpers).
+    if (traffic.followSpeed !== null) {
+      targetSpeed = Math.min(targetSpeed, Math.max(0, traffic.followSpeed * 0.94));
+    }
     targetSpeed *= Math.max(0.08, arrivalFactor);
 
     // Very sharp orientation errors should roll/brake instead of trying to
@@ -933,40 +1139,232 @@ class EntityContext {
     } else {
       vehicleState.stuckTime = Math.max(0, vehicleState.stuckTime - dt * 1.5);
     }
+
+    // Off-path drift: distinct from "pushing into an obstacle" — this is a
+    // car that IS still moving but has been pushed/steered sideways off its
+    // intended line (sideswiped, drifted through a corner, shoved by
+    // another car) and is not converging back toward the route. Caught
+    // separately from stuckTime because the car can be doing this at speed,
+    // where the low-progress test above never fires.
+    const laneDX = aimX - this.x, laneDY = aimY - this.y;
+    const laneDist = Math.hypot(laneDX, laneDY);
+    const laneDeviation = laneDist > 1e-4
+      ? Math.abs(currentForwardX * (laneDY / laneDist) - currentForwardY * (laneDX / laneDist))
+      : 0;
+    const driftingOffPath = laneDist > Math.max(agentRadius * 2.5, lookahead * 0.9) && laneDeviation > 0.55;
+    vehicleState.offPathTime = driftingOffPath ? vehicleState.offPathTime + dt : Math.max(0, vehicleState.offPathTime - dt * 1.5);
+
+    // Predictive pre-impact reverse: obstacle.blocked already means "about
+    // to hit something at this speed" (see _navCarScanObstacles — blocked
+    // is true when the center ray hit is closer than a speed-scaled safety
+    // distance). Treat sustained blocked+closing exactly like being stuck,
+    // so the car starts braking/backing away BEFORE contact instead of only
+    // reacting once it has already stalled against the obstacle.
+    const aboutToHit = obstacle.blocked && actualSpeed > maxSpeed * 0.12;
+    if (aboutToHit) vehicleState.stuckTime += dt * 1.6;
+
     vehicleState.lastX = this.x;
     vehicleState.lastY = this.y;
 
     if (vehicleState.recoveryTimer > 0) {
       vehicleState.recoveryTimer -= dt;
-      this.controller.simulateDrive(-0.72, vehicleState.recoverySign * 0.72);
+      const phase = vehicleState.recoveryPhase || 'back';
+
+      if (phase === 'back') {
+        // Reverse STRAIGHT away first — no lateral steering at all. This is
+        // the fix for "never follow the obstacle while reversing": any
+        // steer input while moving backward swings the car's real-world
+        // heading the OPPOSITE way from a forward turn, so steering toward
+        // the "open side" while still in reverse actually swings the car's
+        // tail toward/along the obstacle it's trying to get away from.
+        // Reversing straight is always safe-by-construction here because
+        // rearClear was already checked before this phase was ever entered.
+        this.controller.simulateDrive(-0.75, 0);
+        vehicleState.recoveryBackDist = (vehicleState.recoveryBackDist || 0)
+          + Math.hypot(this.x - vehicleState.lastX, this.y - vehicleState.lastY);
+
+        const backedFarEnough = vehicleState.recoveryBackDist >= vehicleState.recoveryBackTarget;
+        if (backedFarEnough || vehicleState.recoveryTimer <= 0) {
+          vehicleState.recoveryPhase = 'face';
+          vehicleState.recoveryBackDist = 0;
+        }
+      } else if (phase === 'face') {
+        // Now stationary-ish and clear of the obstacle: rotate in place
+        // (near-zero throttle, full steer) to actually FACE the target/
+        // opening before driving toward it — this is the "reverse to face
+        // the obj or turn to face it, THEN follow" ordering: the car does
+        // not resume chasing the target until its nose is genuinely
+        // pointed at it, so it never drives forward while still angled
+        // into the thing it just backed away from.
+        const faceRad = (this.rotation * Math.PI) / 180;
+        const faceForwardX = Math.sin(faceRad), faceForwardY = -Math.cos(faceRad);
+        const faceDX = targetX - this.x, faceDY = targetY - this.y;
+        const faceDist = Math.hypot(faceDX, faceDY);
+        const faceErr = faceDist > 1e-4
+          ? Math.atan2(
+              faceForwardX * (faceDY / faceDist) - faceForwardY * (faceDX / faceDist),
+              faceForwardX * (faceDX / faceDist) + faceForwardY * (faceDY / faceDist)
+            )
+          : 0;
+        const faced = Math.abs(faceErr) < 12 * Math.PI / 180;
+        // A little creep throttle so the controller's turn model (which
+        // refuses to rotate at exactly zero speed) can actually pivot —
+        // capped low so this never turns into "drive forward while still
+        // facing the wrong way".
+        this.controller.simulateDrive(0.22, Math.sign(faceErr) * 0.85 || vehicleState.recoverySign * 0.85);
+        if (faced || vehicleState.recoveryTimer <= 0) {
+          vehicleState.recoveryPhase = 'back';
+          vehicleState.recoveryBackDist = 0;
+          vehicleState.recoveryTimer = 0;
+        }
+      }
+
       if (vehicleState.recoveryTimer <= 0) {
         vehicleState.stuckTime = 0;
+        vehicleState.offPathTime = 0;
+        vehicleState.recoveryPhase = 'back';
+        vehicleState.recoveryBackDist = 0;
+        // Force an immediate repath rather than just resetting the timer —
+        // a recovery maneuver can easily land the car in a position where
+        // the OLD path's next waypoint is now an awkward angle behind or
+        // beside it. Re-planning from wherever the recovery actually left
+        // the car is what lets it cleanly resume toward the goal instead of
+        // lurching back onto a stale route.
         state.repathTimer = 0;
       }
+      vehicleState.lastX = this.x;
+      vehicleState.lastY = this.y;
       return true;
     }
 
-    if (vehicleState.stuckTime >= (Number(navAgent.vehicleRecoveryTime) || 1.35)) {
-      vehicleState.recoveryTimer = Number(navAgent.vehicleRecoveryReverseTime) || 0.9;
-      vehicleState.recoverySign = obstacle.steer !== 0
-        ? Math.sign(obstacle.steer)
-        : (Math.sign(Math.sin(angleError)) || 1);
-      this.controller.simulateDrive(-0.65, vehicleState.recoverySign * 0.78);
+    const stuckThreshold = Number(navAgent.vehicleRecoveryTime) || 1.35;
+    const offPathThreshold = stuckThreshold * 1.15;
+    const shouldRecover = vehicleState.stuckTime >= stuckThreshold || vehicleState.offPathTime >= offPathThreshold;
+
+    if (shouldRecover) {
+      // Decide the recovery PLAN the way a careful driver would: not
+      // "always back up when stuck" and not one single fixed maneuver —
+      // reverse-only, turn-only, and reverse-then-turn are all considered,
+      // and the plan can freely combine them in sequence (the 'back' ->
+      // 'face' phase machine above always runs both phases; what changes
+      // per-plan is HOW FAR it backs and whether a forward turn is even
+      // allowed to be part of the answer at all).
+      const turnRate = Math.max(0.85, Number(carComponent?.turnSpeed) || 150) * Math.PI / 180;
+      const forwardTurnTime = Math.abs(angleError) / Math.max(0.05, turnRate);
+      const reverseTurnTime = 0.5 + Math.max(0, Math.abs(angleError) - Math.PI * 0.45) / Math.max(1.1, turnRate * 1.3);
+
+      // Clearance on the side a forward turn would swing the car's tail/
+      // flank through. leftClear/rightClear come from the SAME three-ray
+      // scan already run this frame, so this costs nothing extra.
+      const turnSide = Math.sign(Math.sin(angleError)) || (obstacle.steer !== 0 ? Math.sign(obstacle.steer) : 1);
+      const turnSideClearance = turnSide > 0 ? obstacle.rightClear : obstacle.leftClear;
+      const turnClearanceNeeded = agentRadius * 2.4;
+      const turnRiskPenalty = turnSideClearance < turnClearanceNeeded
+        ? (1 - Math.max(0, turnSideClearance) / turnClearanceNeeded)
+        : 0;
+
+      // Would turning here actually walk the car OFF the baked nav layer?
+      // A pivot swings the car's body through an arc, not just its center
+      // point — sample a point offset to the turn side, roughly where the
+      // car's flank travels through mid-turn, and ask the nav layer
+      // directly whether that point is walkable for THIS agent's own
+      // radius+area+areaCosts. Obstacle-scan clearance only sees physical
+      // colliders; it has no idea a "clear" patch of ground is actually
+      // off-road / water / a disallowed area on the nav layer, which is a
+      // separate reason turning-around-here can be the wrong call even
+      // with open space to swing into.
+      const turnArcProbeX = this.x + (-currentForwardY * turnSide) * (agentRadius * 1.8) + currentForwardX * (agentRadius * 0.6);
+      const turnArcProbeY = this.y + (currentForwardX * turnSide) * (agentRadius * 1.8) + currentForwardY * (agentRadius * 0.6);
+      const turnStaysOnNav = !this._scriptApi._navIsWalkableForAgentFn || this._scriptApi._navIsWalkableForAgentFn(
+        turnArcProbeX, turnArcProbeY, agentRadius, agentArea, navAgent ? navAgent.areaCosts : null
+      );
+
+      // Reverse has its own risk: backing into something behind the car.
+      // The rear-lateral rays aren't scanned, so this is a shorter,
+      // deliberately conservative direct raycast behind the car — reverse
+      // only gets credited as "safe" if that's actually clear.
+      const rearProbeDist = Math.max(40, agentRadius * 2.5);
+      const rearHit = (this._scriptApi && typeof this._scriptApi._raycast === 'function')
+        ? this._scriptApi._raycast(
+            this.x, this.y,
+            this.x - currentForwardX * rearProbeDist, this.y - currentForwardY * rearProbeDist,
+            { exclude: [this._entity] }
+          )
+        : null;
+      const rearClear = rearHit && Number.isFinite(rearHit.distance) ? rearHit.distance : rearProbeDist;
+      const reverseBlocked = rearClear < agentRadius * 1.6;
+
+      // A turn is only actually AVAILABLE as part of the plan if it both
+      // has physical clearance (not heavily obstacle-penalized) AND stays
+      // on the nav layer. If turning here would put the car off-mesh, it
+      // is excluded from consideration entirely rather than merely
+      // costed higher — an off-nav-layer position is a strictly worse
+      // outcome than taking longer to reverse, since the car would need
+      // ANOTHER recovery just to get back onto walkable ground.
+      const turnAvailable = turnStaysOnNav && turnRiskPenalty < 0.85;
+
+      const forwardCost = turnAvailable
+        ? forwardTurnTime * (1 + turnRiskPenalty * 2.2)
+        : Infinity;
+      const reverseCost = reverseTurnTime * (reverseBlocked ? 3.0 : 1) + (reverseBlocked ? 0.6 : 0);
+
+      // How far to back up before switching to the facing phase. A plain
+      // "turn is available and cheap" case only needs enough distance to
+      // clear the obstacle's own footprint. When the turn is unavailable
+      // (off-nav-layer or too tight) or reverse is clearly the cheaper
+      // option, back up FARTHER — this is the "combine reverse + turn"
+      // case: a longer reverse buys enough room that the subsequent facing
+      // pivot has a wide-open arc to turn in, rather than a short reverse
+      // followed by a turn that immediately re-triggers the same problem.
+      const shortBack = Math.max(agentRadius * 2.2, 30);
+      const longBack = Math.max(agentRadius * 4.5, 70);
+      vehicleState.recoveryBackTarget = (!turnAvailable || reverseCost <= forwardCost)
+        ? longBack
+        : shortBack;
+
+      // Pick the recovery steering side (used only by the 'face' phase,
+      // never while actually reversing) toward whichever flank actually
+      // has room AND stays on the nav layer — obstacle-scan clearance
+      // first, falling back to the angle-to-target sign if the scan saw no
+      // meaningful difference between sides.
+      const clearanceBias = obstacle.rightClear - obstacle.leftClear;
+      vehicleState.recoverySign = turnStaysOnNav
+        ? (Math.abs(clearanceBias) > 4 ? Math.sign(clearanceBias) : (obstacle.steer !== 0 ? Math.sign(obstacle.steer) : (Math.sign(Math.sin(angleError)) || 1)))
+        : -(Math.abs(clearanceBias) > 4 ? Math.sign(clearanceBias) : 1); // avoid the off-nav side entirely
+
+      vehicleState.recoveryTimer = (Number(navAgent.vehicleRecoveryReverseTime) || 0.9)
+        * (!turnAvailable || reverseCost <= forwardCost ? 1.6 : 1); // combined plan runs longer
+      vehicleState.recoveryPhase = reverseBlocked ? 'face' : 'back';
+      vehicleState.recoveryBackDist = 0;
+      vehicleState.lastX = this.x;
+      vehicleState.lastY = this.y;
       return true;
     }
 
     // The ControllerSystem's driveToward resolver supplies the gear logic
     // (including committed reverse) while this local planner supplies the
     // smooth, forward-looking point and obstacle response.
+    const driveAimDistance = Math.max(lookahead * 0.9, 36);
     this.controller.simulateDriveToward(
-      this.x + steered.x * Math.max(lookahead * 0.9, 36),
-      this.y + steered.y * Math.max(lookahead * 0.9, 36)
+      this.x + steered.x * driveAimDistance,
+      this.y + steered.y * driveAimDistance
     );
-    // Add only the correction that the stock driveToward resolver cannot
-    // know: predictive braking for the NEXT corner/obstacle and a smoothed
-    // steering correction. Positive throttle is intentionally left to the
-    // normal resolver so acceleration is not double-counted.
+
+    // The controller's driveToward resolver remains responsible for forward
+    // vs reverse gear choice. Add the locally planned brake and only a small
+    // steering correction; never add extra positive throttle here because
+    // that would fight the resolver's speed governor.
     this.controller.simulateDrive(Math.min(0, throttle), vehicleState.steer * 0.55);
+
+    // Guaranteed launch: a fresh NavCar at rest should leave a valid route
+    // immediately. Near-zero-speed alignment must not become a deadlock where
+    // the steering planner waits for speed before permitting the car to move.
+    if (actualSpeed < 1.0 && distanceToWaypoint > finalArriveDist * 1.25) {
+      const frontDot = currentForwardX * aimDirX + currentForwardY * aimDirY;
+      if (frontDot > -0.35) {
+        this.controller.simulateDrive(0.28, vehicleState.steer * 0.35);
+      }
+    }
     return true;
   }
 
@@ -1057,6 +1455,10 @@ class EntityContext {
   _navSmoothRouteDirection(path, index, x, y, lookaheadDistance = 16) {
     if (!Array.isArray(path) || path.length === 0) return { x: 1, y: 0 };
     const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const smoothstep = (a, b, v) => {
+      const t = clamp01((v - a) / Math.max(1e-6, b - a));
+      return t * t * (3 - 2 * t);
+    };
     let i = Math.max(0, Math.min(path.length - 1, Number(index) || 0));
     let wx = Number(path[i]?.x);
     let wy = Number(path[i]?.y);
@@ -1143,6 +1545,164 @@ class EntityContext {
   }
 
   /**
+   * Conservative vehicle path simplifier. A* often returns a dense grid
+   * polyline. Walking agents can tolerate following every cell, but a car
+   * will visibly hunt left/right if it tries to steer at each tiny vertex.
+   *
+   * We greedily connect the current point to the farthest future point whose
+   * straight chord is still inside the agent's walkable nav corridor. The
+   * chord is sampled at a spacing tied to the car radius, so simplification
+   * never knowingly crosses a forbidden/narrow region.
+   */
+  _navCarSimplifyPath(path, radius, area, areaCosts) {
+    if (!Array.isArray(path) || path.length < 3) return path;
+
+    // A car should remove noisy A* samples, NOT erase the road's actual
+    // corners. The old visibility simplifier could legally see across a
+    // zig-zag road and replace several bends with one diagonal chord. That
+    // was still "walkable" to the nav grid, but it was the wrong route for a
+    // vehicle. Preserve meaningful direction changes and only collapse points
+    // that are genuinely almost-collinear.
+    const out = [path[0]];
+    const cosKeep = Math.cos(10 * Math.PI / 180);
+    const minSegment = Math.max(2, Math.min(12, (Number(radius) || 8) * 0.20));
+
+    const unit = (a, b) => {
+      const dx = (Number(b.x) || 0) - (Number(a.x) || 0);
+      const dy = (Number(b.y) || 0) - (Number(a.y) || 0);
+      const len = Math.hypot(dx, dy);
+      return len > 1e-5 ? { x: dx / len, y: dy / len, len } : null;
+    };
+
+    for (let i = 1; i < path.length - 1; i++) {
+      const prev = out[out.length - 1];
+      const cur = path[i];
+      const next = path[i + 1];
+      const a = unit(prev, cur);
+      const b = unit(cur, next);
+      if (!a || !b) continue;
+
+      // Keep every real bend. Small grid jitter is removed only when the
+      // incoming/outgoing headings differ by <= 10 degrees.
+      const dot = a.x * b.x + a.y * b.y;
+      const nearlyStraight = dot >= cosKeep;
+      const veryShort = a.len < minSegment || b.len < minSegment;
+      if (!nearlyStraight || !veryShort && a.len >= minSegment && b.len >= minSegment) {
+        out.push(cur);
+      }
+      // For a short nearly-straight grid fragment, skip it. For a long
+      // nearly-straight segment, retain it as a useful route anchor.
+      else if (!nearlyStraight) out.push(cur);
+    }
+    out.push(path[path.length - 1]);
+
+    // Remove accidental duplicate/near-duplicate anchors without ever
+    // removing a corner anchor.
+    const cleaned = [out[0]];
+    for (let i = 1; i < out.length; i++) {
+      const last = cleaned[cleaned.length - 1];
+      if (Math.hypot((out[i].x || 0) - (last.x || 0), (out[i].y || 0) - (last.y || 0)) > 0.75) {
+        cleaned.push(out[i]);
+      }
+    }
+    return cleaned.length >= 2 ? cleaned : [path[0], path[path.length - 1]];
+  }
+
+  /**
+   * Braking lookahead for cars: scans the route FAR beyond the short
+   * steering window (_navCarPathPreview above) to find every corner a
+   * real driver would already be planning for, and returns the speed the
+   * car needs to be down to RIGHT NOW to comfortably make the tightest of
+   * them — treating a run of several close corners (a zigzag/S-curve
+   * road) as one continuous braking problem instead of discovering each
+   * bend only once it's already the nearest waypoint.
+   *
+   * This is intentionally separate from _navCarPathPreview()'s corner
+   * detection, which stays short-range because it drives STEERING (the
+   * point the wheel aims at) — a driver looks far ahead to decide how
+   * hard to brake, but still steers based on the road immediately under
+   * the hood. Conflating the two made the old single-fixed-window
+   * approach ambiguous: a window long enough for high-speed braking would
+   * have made steering hunt at distant corners, and a window short enough
+   * for clean steering left braking with no time to react at speed.
+   *
+   * For each corner found, computes the physically required approach
+   * speed via the standard v = sqrt(2 * a * d) stopping-distance relation
+   * (same relation already used for the final-arrival brake elsewhere in
+   * this file), sized down further by how sharp the corner is — a gentle
+   * bend can be taken faster than a hairpin even at the same distance.
+   * Returns the MINIMUM such speed across every corner in range, which is
+   * exactly the one a driver has to actually obey: you plan for the
+   * tightest upcoming constraint, not the average of all of them.
+   *
+   * @param {Array<{x:number,y:number}>} path
+   * @param {number} index current waypoint index the car is walking toward
+   * @param {number} x @param {number} y car's current position
+   * @param {number} scanRange how far ahead along the route to look, in
+   *   pixels — the caller sizes this to the car's own current speed and
+   *   braking capability so a fast car actually looks far enough ahead.
+   * @param {number} brakeAccel this car's braking deceleration (px/s^2)
+   * @param {number} maxSpeed this car's configured top speed — a corner
+   *   requiring a HIGHER speed than this to "need braking for" is not a
+   *   real constraint (the car was never going to exceed maxSpeed there
+   *   anyway), so such corners are ignored rather than pulling the target
+   *   speed up.
+   * @returns {{targetSpeed:number, nearestCornerDistance:number}}
+   *   targetSpeed: maxSpeed if no corner within range needs braking for,
+   *   otherwise the minimum required approach speed across all of them.
+   */
+  _navCarBrakingLookahead(path, index, x, y, scanRange, brakeAccel, maxSpeed) {
+    if (!Array.isArray(path) || path.length < 2) return { targetSpeed: maxSpeed, nearestCornerDistance: Infinity };
+    let i = Math.max(0, Math.min(path.length - 1, Number(index) || 0));
+    let px = x, py = y;
+    let travelled = 0;
+    let prevTangentX = 0, prevTangentY = 0, havePrevTangent = false;
+    let minTargetSpeed = maxSpeed;
+    let nearestCornerDistance = Infinity;
+    const accel = Math.max(40, Number(brakeAccel) || 1000);
+
+    while (i < path.length && travelled <= scanRange) {
+      const wx = Number(path[i].x) || 0;
+      const wy = Number(path[i].y) || 0;
+      const dx = wx - px, dy = wy - py;
+      const seg = Math.hypot(dx, dy);
+      if (seg > 1e-5) {
+        const ux = dx / seg, uy = dy / seg;
+        if (havePrevTangent) {
+          const dot = Math.max(-1, Math.min(1, prevTangentX * ux + prevTangentY * uy));
+          const turn = Math.acos(dot); // 0 = straight, PI = hairpin reversal
+          if (turn > 0.05) {
+            // Sharper turns need a lower speed at the same distance. This
+            // maps turn angle to a 0-1 "how much must I slow" factor —
+            // a gentle ~15-degree bend barely registers, while anything
+            // beyond ~100 degrees is treated as needing to be nearly
+            // walking-paced through the apex, same spirit as
+            // cornerSeverity elsewhere but tuned for a braking curve
+            // rather than a steering one.
+            const sharpness = Math.max(0, Math.min(1, turn / (Math.PI * 0.62)));
+            // Physical approach speed for this corner: how fast the car
+            // can be going NOW and still be slowed to a corner-appropriate
+            // speed by the time it arrives, using the same v=sqrt(2*a*d)
+            // relation as the final-arrival brake. The corner's own
+            // "comfortable" speed shrinks with sharpness so a hairpin is
+            // targeted near a crawl while a gentle bend barely slows.
+            const cornerComfortSpeed = maxSpeed * (1 - sharpness * 0.85);
+            const approachSpeed = Math.sqrt(
+              Math.max(0, cornerComfortSpeed * cornerComfortSpeed + 2 * accel * travelled)
+            );
+            if (approachSpeed < minTargetSpeed) minTargetSpeed = approachSpeed;
+            if (travelled < nearestCornerDistance) nearestCornerDistance = travelled;
+          }
+        }
+        prevTangentX = ux; prevTangentY = uy; havePrevTangent = true;
+        travelled += seg;
+      }
+      px = wx; py = wy; i++;
+    }
+    return { targetSpeed: Math.max(0, Math.min(maxSpeed, minTargetSpeed)), nearestCornerDistance };
+  }
+
+  /**
    * Vehicle-specific path preview. Grid/A* paths are deliberately kept as
    * navigation data, while the car follows a look-ahead point between/along
    * those waypoints. This removes the stop-turn-go look of point chasing.
@@ -1153,6 +1713,10 @@ class EntityContext {
       return { x, y, cornerSeverity: 0, cornerDistance: Infinity, tangentX: 0, tangentY: -1 };
     }
     const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const smoothstep = (a, b, v) => {
+      const t = clamp01((v - a) / Math.max(1e-6, b - a));
+      return t * t * (3 - 2 * t);
+    };
     let i = Math.max(0, Math.min(path.length - 1, Number(index) || 0));
     let px = x, py = y;
     let remaining = Math.max(1, lookaheadDistance);
@@ -1163,6 +1727,8 @@ class EntityContext {
     let cornerSeverity = 0;
     let cornerDistance = Infinity;
     let cornerIndex = -1;
+    let cornerIncomingLength = 0;
+    let cornerTravelBeforeSegment = 0;
 
     while (i < path.length) {
       const wx = Number(path[i].x) || 0;
@@ -1184,7 +1750,7 @@ class EntityContext {
       // At this waypoint, compare the incoming direction with the next
       // outgoing segment. A large change means a driver should start
       // braking before the corner rather than after it.
-      if (i < path.length - 1 && tangentX !== 0 || tangentY !== 0) {
+      if (i < path.length - 1 && (tangentX !== 0 || tangentY !== 0)) {
         const nx = (Number(path[i + 1].x) || 0) - wx;
         const ny = (Number(path[i + 1].y) || 0) - wy;
         const nlen = Math.hypot(nx, ny);
@@ -1197,6 +1763,13 @@ class EntityContext {
           if (cornerDistance === Infinity) {
             cornerDistance = travelled;
             cornerIndex = i;
+            cornerIncomingLength = i > 0
+              ? Math.hypot(
+                  (Number(path[i].x) || 0) - (Number(path[i - 1].x) || 0),
+                  (Number(path[i].y) || 0) - (Number(path[i - 1].y) || 0)
+                )
+              : seg;
+            cornerTravelBeforeSegment = Math.max(0, travelled - cornerIncomingLength);
           }
         }
       }
@@ -1221,7 +1794,28 @@ class EntityContext {
     let tangentBlend = 0;
     if (cornerIndex >= 0 && cornerIndex < path.length - 1 && cornerDistance !== Infinity) {
       const turnWindow = Math.max(18, Math.min(72, Number(cornerLookahead) || 70));
-      tangentBlend = 1 - clamp01(cornerDistance / turnWindow);
+
+      // Real drivers generally do not start rotating the car the instant a
+      // new navigation edge begins.  A grid/path corner can otherwise make
+      // the vehicle “turn at the edge” and visibly hug the wrong side of the
+      // road.  Wait until the car has covered roughly the first half of the
+      // incoming edge before blending toward the outgoing edge.  This keeps
+      // the car committed to one direction through the first half of a
+      // segment, then lets it arc naturally into the turn.
+      // cornerDistance is measured from the car to the corner.  When the
+      // corner is the next route vertex, subtracting that distance from the
+      // full incoming-edge length gives exactly how far through the edge the
+      // car has progressed.  If a future corner is more than one edge away,
+      // the gate stays closed.
+      const incomingLength = Math.max(1, cornerIncomingLength);
+      const midEdgeFraction = clamp01(1 - cornerDistance / incomingLength);
+      // Steering stays fully committed to the incoming edge until ~50% of
+      // that edge has been travelled. The next segment only becomes eligible
+      // after this gate, preventing the repeated tiny-left/tiny-right hunt on
+      // long straight road cells.
+      const midEdgeGate = smoothstep(0.50, 0.72, midEdgeFraction);
+      const distanceGate = 1 - clamp01(cornerDistance / turnWindow);
+      tangentBlend = distanceGate * midEdgeGate;
       tangentBlend = tangentBlend * tangentBlend * (3 - 2 * tangentBlend);
       // Tight corners are kept much more conservative than gentle curves.
       // A near-180-degree reversal should never be rounded aggressively,
@@ -1243,7 +1837,149 @@ class EntityContext {
         if (tlen > 1e-5) { tangentX /= tlen; tangentY /= tlen; }
       }
     }
-    return { x: aimX, y: aimY, cornerSeverity, cornerDistance, tangentX, tangentY, tangentBlend };
+    const cornerTurnGate = (cornerIndex >= 0 && cornerIncomingLength > 1e-5)
+      ? smoothstep(0.50, 0.72, clamp01(1 - cornerDistance / cornerIncomingLength))
+      : 1;
+    return { x: aimX, y: aimY, cornerSeverity, cornerDistance, cornerIndex, cornerIncomingLength, cornerTurnGate, tangentX, tangentY, tangentBlend };
+  }
+
+  /**
+   * Predictive traffic awareness for NavCars: anticipates other moving
+   * NavAgent2D/Car entities BEFORE they become a raycast hit, the way a
+   * real driver watches other cars' trajectories rather than only
+   * reacting once something is directly in front of the hood.
+   *
+   * This is deliberately separate from _navCarScanObstacles() (which
+   * stays a reactive short-range raycast fan for static/late geometry)
+   * and from _applyNavAvoidance() (a static-position potential field with
+   * no sense of where a neighbor is HEADING). Three real-driver behaviors
+   * this adds that neither of those covers:
+   *
+   *   1. CLOSING-SPEED BRAKING: projects both this car's and each nearby
+   *      agent's position forward over a short horizon and brakes
+   *      proportional to how soon (not just how close) they'd collide —
+   *      a fast car closing on a slow one brakes earlier than a
+   *      near-stationary one the same distance away, same as a human
+   *      judging "how long until I reach that gap" rather than just "how
+   *      far away is it right now".
+   *   2. FOLLOWING DISTANCE: a neighbor moving the same direction, close
+   *      ahead, in-lane, is treated as "traffic to follow" rather than
+   *      "obstacle to dodge" — this car matches/undercuts the lead
+   *      car's speed instead of swerving around it or tailgating at full
+   *      throttle until a raycast finally fires.
+   *   3. YIELD BY PRIORITY: when two NavCars' predicted paths are about
+   *      to cross (an intersection-style conflict, not a following
+   *      situation), the one with the LOWER NavAgent2D.avoidancePriority
+   *      brakes to let the higher-priority one through — reuses the
+   *      exact same priority field _applyNavAvoidance() already has, so
+   *      existing avoidancePriority tuning on a scene keeps working
+   *      without any new per-agent setup.
+   *
+   * Only queries entities with a Rigidbody2D (so a parked/kinematic prop
+   * with a NavAgent2D but no velocity falls through to the ordinary
+   * raycast/avoidance path instead of ever being treated as "traffic").
+   *
+   * @returns {{brake:number, followSpeed:number|null, yield:boolean}}
+   *   brake: 0-1 additional braking pressure from anticipated traffic.
+   *   followSpeed: the lead car's own speed to match/undercut, or null
+   *     if nothing is being followed this frame.
+   *   yield: true if this car should hold back for a higher-priority
+   *     crossing car regardless of the numeric brake amount (used to
+   *     force a firmer stop at a predicted intersection conflict rather
+   *     than only a partial slowdown).
+   */
+  _navCarTrafficScan(navAgent, agentRadius, speed, aimDirX, aimDirY) {
+    var world = this._world;
+    if (!world || typeof world.query !== "function") return { brake: 0, followSpeed: null, yield: false };
+
+    var selfId = this._entity.id;
+    var selfX = this.x, selfY = this.y;
+    var selfSpeed = Math.max(0, Number(speed) || 0);
+    var selfPriority = Number(navAgent.avoidancePriority) || 0;
+
+    // Look further ahead the faster this car is going — same idea as a
+    // human driver's following distance growing with speed, not a fixed
+    // bumper-to-bumper radius regardless of how fast either car is moving.
+    var horizon = Math.max(0.6, Math.min(2.2, 0.6 + selfSpeed / 220)); // seconds
+    var scanRange = Math.max(60, selfSpeed * horizon + agentRadius * 3);
+
+    var others = world.query(NAV_AGENT_2D, TRANSFORM, RIGIDBODY_2D);
+    var brake = 0;
+    var followSpeed = null;
+    var closestFollowDist = Infinity;
+    var shouldYield = false;
+
+    for (var i = 0; i < others.length; i++) {
+      var other = others[i];
+      if (other.id === selfId) continue;
+      var otherTransform = other.getComponent(TRANSFORM);
+      var otherRb = other.getComponent(RIGIDBODY_2D);
+      var otherAgent = other.getComponent(NAV_AGENT_2D);
+      if (!otherTransform || !otherRb || !otherAgent) continue;
+
+      var offX = otherTransform.x - selfX;
+      var offY = otherTransform.y - selfY;
+      var dist = Math.hypot(offX, offY);
+      if (dist > scanRange || dist <= 0.000001) continue;
+
+      var otherVX = Number(otherRb.velocityX) || 0;
+      var otherVY = Number(otherRb.velocityY) || 0;
+      var otherSpeed = Math.hypot(otherVX, otherVY);
+
+      // Only cars roughly ahead of this one's intended direction matter —
+      // a neighbor behind or well off to the side is not something a
+      // driver brakes for, that is what side-avoidance/steering already
+      // handles via _applyNavAvoidance/_navCarScanObstacles.
+      var aheadDot = (offX / dist) * aimDirX + (offY / dist) * aimDirY;
+      if (aheadDot < 0.35) continue;
+
+      var combinedRadius = agentRadius + (Number(otherAgent.radius) || agentRadius);
+
+      // Closing speed along the line between the two cars: positive means
+      // the gap is shrinking. `n` points from this car TOWARD the other
+      // car, so relative velocity projected onto `n` (no negation) is
+      // exactly the rate the distance between them is closing — positive
+      // when this car is gaining on the other, negative when the gap is
+      // opening. Using relative velocity (not just this car's own speed)
+      // is what lets this correctly ignore a car moving away at the same
+      // speed ahead, and correctly react early to one coming to a stop or
+      // turning across this car's path.
+      var nx = offX / dist, ny = offY / dist;
+      var relVX = selfSpeed * aimDirX - otherVX;
+      var relVY = selfSpeed * aimDirY - otherVY;
+      var closingSpeed = relVX * nx + relVY * ny;
+      if (closingSpeed <= 0.001) continue; // gap steady or opening — no anticipation needed
+
+      var timeToClose = Math.max(0, dist - combinedRadius) / closingSpeed;
+      if (timeToClose > horizon) continue;
+
+      // Same-direction, close ahead, roughly centered on this car's aim —
+      // this is "traffic to follow", not a crossing conflict. Track the
+      // nearest such neighbor so this car can match its speed smoothly
+      // instead of alternating between full throttle and hard braking.
+      var headingAgreement = otherSpeed > 1
+        ? (otherVX / otherSpeed) * aimDirX + (otherVY / otherSpeed) * aimDirY
+        : 1; // a stopped car ahead counts as "in-lane" for following purposes
+      var laneAlignment = aheadDot > 0.85;
+      if (laneAlignment && headingAgreement > 0.6 && dist < closestFollowDist) {
+        closestFollowDist = dist;
+        followSpeed = otherSpeed;
+      }
+
+      var urgency = Math.max(0, Math.min(1, 1 - timeToClose / horizon));
+      brake = Math.max(brake, urgency);
+
+      // Crossing-path conflict (not simple following): the lower-priority
+      // car yields. Only applies when paths genuinely cross rather than
+      // run parallel, so two cars in the same lane don't fight over
+      // priority when they should just be following each other.
+      if (!laneAlignment) {
+        var otherPriority = Number(otherAgent.avoidancePriority) || 0;
+        if (selfPriority < otherPriority && urgency > 0.15) shouldYield = true;
+      }
+    }
+
+    return { brake, followSpeed, yield: shouldYield };
   }
 
   /** Local short-range obstacle scanner for cars. Nav baking handles the
@@ -1253,7 +1989,14 @@ class EntityContext {
     const forwardAngle = (transform.rotation * Math.PI) / 180;
     const fx = Math.sin(forwardAngle), fy = -Math.cos(forwardAngle);
     const rx = Math.cos(forwardAngle), ry = Math.sin(forwardAngle);
-    const range = Math.max(48, Number(navAgent?.vehicleObstacleLookahead) || 120);
+    // Base configured lookahead, extended further the faster the car is
+    // currently moving — a real driver watches farther down the road at
+    // speed instead of scanning the same fixed distance whether crawling
+    // or at full throttle. Capped at 2x base so a very fast car cannot
+    // start braking for something absurdly far away and behind a corner.
+    const baseRange = Math.max(48, Number(navAgent?.vehicleObstacleLookahead) || 120);
+    const speedRangeBoost = Math.max(0, Math.min(baseRange, (Number(speed) || 0) * 0.55));
+    const range = baseRange + speedRangeBoost;
     const width = Math.max(6, Number(navAgent?.vehicleObstacleWidth) || 28);
     const cast = (dx, dy, length) => {
       if (!this._scriptApi || typeof this._scriptApi._raycast !== 'function') return null;
@@ -1577,7 +2320,7 @@ class EntityContext {
    * e.g. "Rigidbody2D", "CharacterController", "Collider2D",
    * "SpriteRenderer", "AudioSource", "Light", "Camera",
    * "SpriteAnimation", "TextRenderer", "SpeechBubble", "ChatLog",
-   * "TextInput"). "Transform" always returns true — every entity has
+   * "TextInput", "StrokePath"). "Transform" always returns true — every entity has
    * one. Safe to call on any entity context, including ones from
    * find()/findFirst()/onCollision's `other` — not just `this`.
    *   function onUpdate() {
@@ -1828,6 +2571,7 @@ class EntityContext {
     // this.collider, which is read-only).
     this.navAgent    = entity.hasComponent(NAV_AGENT_2D)         ? createNavAgentAPI(entity)    : undefined;
     this.light       = entity.hasComponent(LIGHT)                ? createLightAPI(entity)       : undefined;
+    this.strokePath  = entity.hasComponent(STROKE_PATH)          ? createStrokePathAPI(entity)  : undefined;
     // this.ear — component-gated like everything else above.
     this.ear         = entity.hasComponent(AUDIO_LISTENER)       ? createAudioListenerAPI(entity, this._scriptApi) : undefined;
 
@@ -2142,6 +2886,16 @@ export class ScriptAPI {
      *  needs to re-bake after spawning its own obstacles at runtime —
      *  most games bake once in the editor and never call this. */
     this._navBakeFn = null;
+    /** Set by createGame from the project's editor Edit → Nav Areas…
+     *  registry (editor/state/NavAreas.js's getNavAreaNames()), threaded
+     *  through the same way gameFps travels (PlayWindow.js →
+     *  play-popup.js → createGame()) — a NAV_AREA_COUNT-length array of
+     *  slot names, or null in contexts that never wired it through (e.g.
+     *  an older exported build). Backs nav.areaIndex()/nav.areaMask() so
+     *  scripts can refer to areas by the same names the editor shows,
+     *  instead of hand-writing bit positions. See NavAPI.js's
+     *  resolveNavAreaIndex/resolveNavAreaMask for the actual lookup. */
+    this._navAreaNames = null;
 
     this._setupInput();
   }
@@ -3192,6 +3946,42 @@ export class ScriptAPI {
         bake: function () {
           return self._navBakeFn ? self._navBakeFn() : null;
         },
+        /**
+         * Resolves a named NavWorld2D area (as named in editor Edit →
+         * Nav Areas…) to its 0-15 slot index — the named-string
+         * counterpart to hand-writing a bit position.
+         *   nav.areaIndex("Water")   // -> e.g. 1
+         * Case-insensitive. Returns -1 if no area has that name.
+         */
+        areaIndex: function (name) {
+          return resolveNavAreaIndex(self._navAreaNames, name);
+        },
+        /**
+         * Turns one or more named areas into the bitmask nav.findPath's
+         * `area` option (and NavAgent2D.area) expect:
+         *   nav.findPath(x1, y1, x2, y2, { area: nav.areaMask("Ground", "Road") })
+         * Unknown names are skipped rather than corrupting the rest of
+         * the mask; a call where NONE of the names resolve returns 0
+         * (nothing allowed) — a typo fails closed instead of quietly
+         * falling back to "every area allowed".
+         */
+        areaMask: function () {
+          return resolveNavAreaMask(self._navAreaNames, Array.prototype.slice.call(arguments));
+        },
+        /**
+         * Turns a named cost map into the 16-entry array nav.findPath's
+         * `areaCosts` option (and NavAgent2D.areaCosts) expect:
+         *   nav.findPath(x1, y1, x2, y2, {
+         *     area: nav.areaMask("Ground", "Road", "Mud"),
+         *     areaCosts: nav.areaCosts({ Road: 0.5, Mud: 4 })
+         *   })
+         * A name that doesn't resolve, or a cost that isn't a finite
+         * number > 0, is skipped — that slot falls back to NavWorld2D's
+         * own cost for it rather than the whole call failing.
+         */
+        areaCosts: function (costsByName) {
+          return resolveNavAreaCosts(self._navAreaNames, costsByName);
+        },
       },
       /**
        * Send a message to script instances on entities matching the
@@ -3432,9 +4222,36 @@ export class ScriptAPI {
        * directly. These five are ADDITIONS, not wrappers, so there's no
        * overlap/duplication with native Math.
        */
+      /**
+       * Standard smoothstep easing. Exposed both as bare `smoothstep(a,b,v)`
+       * and through `mathx.smoothstep(...)` so existing scripts that use the
+       * helper do not fail at runtime. Inputs are clamped to [0,1] between
+       * the two edges; reversed edges are handled safely.
+       */
+      smoothstep: function (a, b, value) {
+        var lo = Number(a);
+        var hi = Number(b);
+        var v = Number(value);
+        if (!Number.isFinite(lo) || !Number.isFinite(hi) || !Number.isFinite(v)) return 0;
+        if (hi < lo) { var tmp = lo; lo = hi; hi = tmp; }
+        if (Math.abs(hi - lo) < 1e-8) return v < hi ? 0 : 1;
+        var t = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+        return t * t * (3 - 2 * t);
+      },
       mathx: {
         /** Linear interpolation from a to b. t=0 -> a, t=1 -> b (t is not clamped, so overshoot works). */
         lerp: function (a, b, t) { return a + (b - a) * t; },
+        /** Smooth Hermite easing between a and b; equivalent to the bare smoothstep helper. */
+        smoothstep: function (a, b, value) {
+          var lo = Number(a);
+          var hi = Number(b);
+          var v = Number(value);
+          if (!Number.isFinite(lo) || !Number.isFinite(hi) || !Number.isFinite(v)) return 0;
+          if (hi < lo) { var tmp = lo; lo = hi; hi = tmp; }
+          if (Math.abs(hi - lo) < 1e-8) return v < hi ? 0 : 1;
+          var t = Math.max(0, Math.min(1, (v - lo) / (hi - lo)));
+          return t * t * (3 - 2 * t);
+        },
         /** Restrict value to the [min, max] range. */
         clamp: function (value, min, max) { return value < min ? min : (value > max ? max : value); },
         /** Move current toward target by at most maxDelta this call — no overshoot. Great for frame-rate-independent easing: this.x = mathx.moveToward(this.x, targetX, 200 * time.deltaTime). */

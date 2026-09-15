@@ -80,7 +80,7 @@ const ENGINE_OBJECTS = [
   // colored via ENGINE_MEMBERS below, e.g. this.state.current, but the
   // object name itself — state/ear/collider — never got the
   // zen-token-object color the other this.<sub-object> names all get.
-  "state", "ear", "collider", "navAgent", "myTouch",
+  "state", "ear", "collider", "navAgent", "myTouch", "strokePath",
 ];
 
 // Cast-target type names recognized after `as` / inside `as ( … )` — kept
@@ -96,6 +96,7 @@ const ENGINE_CAST_TYPES = [
   "Rigidbody", "Rigidbody2D", "DynamicBody", "KinematicBody", "StaticBody",
   "Controller", "CharacterController", "PlatformerController",
   "TopDownController", "CarController", "FollowController",
+  "StrokePath",
 ];
 
 // The `as` cast keyword itself — matched as a bare word (it's not a
@@ -162,9 +163,10 @@ const ENGINE_MEMBERS = [
   "entity", "point", "normal", "distance",
   // Raycast opts: physics.raycast(x1,y1,x2,y2, { exclude, layerMask, debug })
   "exclude", "layerMask",
-  // Nav (nav.findPath/isWalkable/bake — see components/NavWorld2D.js and
-  // NavAPI.js). "debug" already covered above (Physics' raycast opts).
-  "findPath", "isWalkable", "bake",
+  // Nav (nav.findPath/isWalkable/bake/areaIndex/areaMask — see
+  // components/NavWorld2D.js and NavAPI.js). "debug" already covered
+  // above (Physics' raycast opts).
+  "findPath", "isWalkable", "bake", "areaIndex", "areaMask", "areaCosts",
   // Nav Agent (this.navAgent.* — see NavAgentAPI.js). radius/layer/
   // acceleration are already covered above (Light/Physics/Controller)
   // since this list is matched regardless of which object precedes the
@@ -188,7 +190,15 @@ const ENGINE_MEMBERS = [
   // object precedes the dot.
   "shapeType", "fillColor", "outlineEnabled", "outlineColor", "outlineWidth",
   // Light
-  "intensity", "radius", "angle", "castsOnWorld", "castShadows", "shadowColor", "shadowStrength",
+  "intensity", "radius", "angle", "castsOnWorld", "castShadows", "shadowColor", "shadowStrength", "flicker", "flickerSpeed", "flickerDuration", "coreSize", "coreVisible",
+  // Stroke Path (this.strokePath.* — see StrokePathAPI.js). color/opacity/
+  // radius/width/height are already covered above (Sprite/Collider) since
+  // this list is matched regardless of which object precedes the dot.
+  "points", "thickness", "useTexture", "textureKey", "textureMode",
+  "textureTiling", "textureScale", "textureOffset", "textureFlip", "textureRotation",
+  "jointMode", "capMode", "pointCount", "getLength",
+  "firstPoint", "lastPoint", "worldToLocal", "localToWorld",
+  "getPoint", "setPoint", "addPoint", "insertPoint", "removePoint",
   // Input
   "keyDown", "keyPressed",
   // Mouse
@@ -467,7 +477,7 @@ export function applyZenDecorations(monaco, editorInstance, model, scriptName) {
     const prevIds = _decorationIds[scriptName] || [];
     _decorationIds[scriptName] = editorInstance.deltaDecorations(prevIds, decorations);
   } catch (e) {
-    console.warn("[ZenEngine Highlighting] decoration pass failed for '" + scriptName + "':", e);
+    console.warn("[Vaelis Highlighting] decoration pass failed for '" + scriptName + "':", e);
   }
 }
 

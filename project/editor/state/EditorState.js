@@ -35,6 +35,18 @@ export const editorState = {
    *  above, just for the Sprite Renderer's texture-swap button instead
    *  of the Script component's "Load Script" button. */
   spritePickerOpen: false,
+  /** @type {"SpriteRenderer"|"StrokePath"} which component the sprite
+   *  picker's current selection should be written onto — the same
+   *  asset-picker window is reused for choosing a SpriteRenderer's
+   *  sprite AND a StrokePath's fill texture (both just want "pick one
+   *  imported image asset"), rather than duplicating an entire modal
+   *  for StrokePath's texture button. Set right before
+   *  spritePickerOpen is turned on (see Inspector.js's "sprite-pick"
+   *  button vs. its StrokePath texture-pick button, and
+   *  EditorEvents.js's "open-sprite-picker" handler), read back by
+   *  "sprite-picker-choose" to decide which component's field the pick
+   *  actually writes to. */
+  spritePickerTarget: "SpriteRenderer",
 
   /** @type {boolean} whether the "Export Game" popup is open (see
    *  ExportWindow.js / Toolbar.js's Export button) — same open/close

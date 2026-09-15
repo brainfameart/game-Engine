@@ -181,6 +181,17 @@
     margin-bottom: var(--sp-4);
 }
 .tpl-icon svg { width: 18px; height: 18px; color: var(--accent); }
+.tpl-thumb {
+    width: calc(100% + 2 * var(--sp-5)); margin: calc(-1 * var(--sp-5)) calc(-1 * var(--sp-5)) var(--sp-4);
+    aspect-ratio: 720 / 377; overflow: hidden; border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    background: var(--bg-900);
+}
+.tpl-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* A thumbnail card's art needs more width to read well than the plain
+   icon cards (which stay at the grid's normal minmax(200px, 1fr) track) —
+   span two tracks where the grid is wide enough for it, same pattern as
+   e.g. a "featured" tile in a card grid. */
+.template-card.has-thumb { grid-column: span 2; min-width: 320px; }
 .tpl-name { font-size: var(--fs-sm); font-weight: 600; color: var(--text-100); margin-bottom: var(--sp-1); }
 .tpl-desc { font-size: var(--fs-2xs); color: var(--text-500); line-height: 1.55; }
 

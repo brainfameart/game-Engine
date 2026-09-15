@@ -443,6 +443,14 @@ export class PhysicsWorld {
     // into motion instead of giving it a one-frame shove.
     this._smoothKinematicDynamicPushes(entities, stepDt, preStepDynamicVelocities);
 
+    // High-speed side impacts can produce a large friction impulse at a wall.
+    // For controller-driven Dynamic bodies, that impulse must not turn the
+    // wall into a magnetic surface that steals the jump/fall velocity.
+    // Preserve only the expected gravity/damping update on the wall tangent;
+    // floor and ceiling contacts are deliberately excluded so normal landing
+    // and head-hit responses remain fully solver-owned.
+    this._preserveDynamicWallFallSpeed(entities, stepDt, preStepDynamicVelocities);
+
 
     // write results back onto Transform for every DYNAMIC / KINEMATIC body
     for (const entity of entities) {
@@ -911,6 +919,103 @@ export class PhysicsWorld {
 
       handle.body.setLinvel({ x: vx, y: vy }, true);
       handle.body.wakeUp();
+    }
+  }
+
+  _preserveDynamicWallFallSpeed(entities, dt, preStepDynamicVelocities) {
+    if (!Array.isArray(entities) || dt <= 0 || !this.rapierWorld) return;
+
+    for (const entity of entities) {
+      const rb = entity.getComponent(RIGIDBODY_2D);
+      if (!rb || rb.bodyType !== BodyType.DYNAMIC || !rb.simulated) continue;
+
+      // This correction is intentionally limited to Movement Type bodies.
+      // Plain Dynamic bodies are still expected to obey their configured
+      // friction material, while character movement should never get slower
+      // falling simply because the horizontal impact speed was higher.
+      if (!entity.hasComponent(CHARACTER_CONTROLLER)) continue;
+
+      const handle = this._handles.get(entity.id);
+      if (!handle?.body || !handle.collider) continue;
+
+      let hasWallContact = false;
+      let hasSupportOrCeiling = false;
+      let bestWallNormal = null;
+
+      try {
+        this.rapierWorld.contactPairsWith(handle.collider, (other) => {
+          if (!other || other.isSensor?.()) return;
+          if (!this._collisionGroupsInteract(handle.collider.collisionGroups(), other.collisionGroups())) return;
+
+          const otherBody = typeof other.parent === 'function' ? other.parent() : null;
+          const otherType = otherBody?.bodyType?.();
+          // A Dynamic-vs-Dynamic contact can legitimately change vertical
+          // velocity, so never overwrite that solver response here.
+          if (otherType === this.RAPIER.RigidBodyType.Dynamic) return;
+
+          this.rapierWorld.contactPair(handle.collider, other, (manifold, flipped) => {
+            if (!manifold || (typeof manifold.numContacts === 'function' && manifold.numContacts() <= 0)) return;
+            const n = this._selfContactNormal(handle.collider, manifold, flipped);
+            if (!n) return;
+
+            const nx = Number(n.x) || 0;
+            const ny = Number(n.y) || 0;
+            const len = Math.hypot(nx, ny);
+            if (len < 1e-7) return;
+            const ux = nx / len;
+            const uy = ny / len;
+
+            // Y-down coordinates: floor/support normals point up (negative Y),
+            // ceilings point down (positive Y). Only a predominantly horizontal
+            // normal counts as a wall for this correction.
+            const wallLike = Math.abs(ux) > Math.abs(uy) * 1.5;
+            if (!wallLike) {
+              hasSupportOrCeiling = true;
+              return;
+            }
+
+            hasWallContact = true;
+            bestWallNormal = { x: ux, y: uy };
+          });
+        });
+      } catch (_) {
+        continue;
+      }
+
+      if (!hasWallContact || hasSupportOrCeiling) continue;
+
+      const pre = preStepDynamicVelocities?.get(entity.id);
+      if (!pre) continue;
+
+      let vel = handle.body.linvel();
+      let vx = Number(vel?.x) || 0;
+      let vy = Number(vel?.y) || 0;
+
+      // A pure wall cannot change the normal (horizontal) velocity except by
+      // blocking it, so keep that solver result. Reconstruct only the vertical
+      // component expected from the pre-step velocity + this body's gravity.
+      // Linear damping is included as a small multiplicative factor matching
+      // Rapier's damped-velocity integration closely enough without attempting
+      // to replace its solver.
+      const gravityScale = Number(rb.gravityScale);
+      const gScale = Number.isFinite(gravityScale) ? gravityScale : 1;
+      const damping = Math.max(0, Number(rb.linearDamping) || 0);
+      const dampingFactor = damping > 0 ? 1 / (1 + damping * dt) : 1;
+      const expectedVy = ((Number(pre.y) || 0) + GRAVITY_Y * gScale * dt) * dampingFactor;
+
+      // Correct only a friction-induced loss of tangent speed. Never create
+      // extra downward/upward speed when the solver already produced an equal
+      // or larger tangent velocity.
+      const tangentSign = Math.abs(expectedVy) > 1e-5 ? Math.sign(expectedVy) : Math.sign((Number(pre.y) || 0) + GRAVITY_Y * gScale * dt);
+      const lostTangent = tangentSign === 0
+        ? 0
+        : (Math.abs(expectedVy) - Math.abs(vy)) * tangentSign;
+
+      if (lostTangent > 0.5) {
+        vy += lostTangent;
+        handle.body.setLinvel({ x: vx, y: vy }, true);
+        handle.body.wakeUp();
+      }
     }
   }
 

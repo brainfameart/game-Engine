@@ -14,6 +14,7 @@ import { Transform, TRANSFORM } from "../../runtime/components/Transform.js";
 import { CAMERA } from "../../runtime/components/Camera.js";
 import { SPRITE_RENDERER, SpriteRenderer } from "../../runtime/components/SpriteRenderer.js";
 import { SHAPE_RENDERER, ShapeRenderer, ShapeType } from "../../runtime/components/ShapeRenderer.js";
+import { STROKE_PATH, StrokePath } from "../../runtime/components/StrokePath.js";
 import { TEXT_RENDERER, TextRenderer } from "../../runtime/components/TextRenderer.js";
 import { SPEECH_BUBBLE, SpeechBubble } from "../../runtime/components/SpeechBubble.js";
 import { CHAT_LOG, ChatLog } from "../../runtime/components/ChatLog.js";
@@ -71,6 +72,7 @@ const COMPONENT_TYPE_MAP = {
   Camera: CAMERA,
   SpriteRenderer: SPRITE_RENDERER,
   ShapeRenderer: SHAPE_RENDERER,
+  StrokePath: STROKE_PATH,
   TextRenderer: TEXT_RENDERER,
   SpeechBubble: SPEECH_BUBBLE,
   ChatLog: CHAT_LOG,
@@ -283,8 +285,10 @@ let _lastSceneClick = { id: null, time: 0 };
         const hasTilemap = !!world && world.query(TILEMAP).length > 0;
         const hasTileset = !!world && world.query(TILESET).length > 0;
         const hasNavWorld = !!world && world.query(NAV_WORLD_2D).length > 0;
+        const hasStrokePath = !!world && world.query(STROKE_PATH).length > 0;
         const allowed =
           requested === "pan" || requested === "translate" || requested === "rotate" || requested === "scale" ||
+          ((requested === "path") && hasStrokePath) ||
           ((requested === "tile") && (hasTilemap || hasTileset)) ||
           ((requested === "erase") && (hasTilemap || hasNavWorld)) ||
           ((requested === "nav") && hasNavWorld) ||
@@ -490,6 +494,13 @@ let _lastSceneClick = { id: null, time: 0 };
         break;
       }
       case "open-sprite-picker":
+        // data-target lets a caller other than the SpriteRenderer
+        // section (e.g. StrokePath's texture-pick button — see
+        // Inspector.js) specify which component the pick should land
+        // on; omitted, it defaults back to SpriteRenderer so every
+        // existing call site (which never set data-target) keeps
+        // behaving exactly as before.
+        editorState.spritePickerTarget = t.dataset.target || "SpriteRenderer";
         editorState.spritePickerOpen = true;
         render();
         break;
@@ -498,22 +509,29 @@ let _lastSceneClick = { id: null, time: 0 };
         render();
         break;
       case "sprite-picker-choose": {
-        // Opened from the Inspector's Sprite Renderer section (see
-        // Inspector.js's "sprite-pick" button), so the SELECTED
-        // entity's SpriteRenderer component is guaranteed to already
-        // exist — this only ever SWAPS which texture it points at, it
-        // never adds the component (unlike script-picker-choose above,
-        // which does add a Script component since that button lives
-        // under "Load Script" rather than an existing component's own
-        // section).
+        // Opened from either the Sprite Renderer section's "sprite-pick"
+        // button or the StrokePath section's texture-pick button (see
+        // Inspector.js) — editorState.spritePickerTarget (set when the
+        // picker was opened, just above) decides which one this
+        // particular pick applies to, since both share this same modal.
         var pickedSpriteKey = t.dataset.spriteKey;
         var spritePickEnt = editorState.world && editorState.world.getEntity(editorState.selectedId);
-        var spritePickRenderer = spritePickEnt && spritePickEnt.getComponent(SPRITE_RENDERER);
-        if (spritePickRenderer && pickedSpriteKey) {
-          snapshotNow("scene");
-          spritePickRenderer.spriteKey = pickedSpriteKey;
-          var pickedAsset = getSpriteAsset(pickedSpriteKey);
-          pushLog("log", "Set sprite to '" + (pickedAsset ? pickedAsset.name : pickedSpriteKey) + "' on '" + spritePickEnt.name + "'.");
+        if (editorState.spritePickerTarget === "StrokePath") {
+          var strokePathForPick = spritePickEnt && spritePickEnt.getComponent(STROKE_PATH);
+          if (strokePathForPick && pickedSpriteKey) {
+            snapshotNow("scene");
+            strokePathForPick.textureKey = pickedSpriteKey;
+            var pickedTextureAsset = getSpriteAsset(pickedSpriteKey);
+            pushLog("log", "Set Stroke Path texture to '" + (pickedTextureAsset ? pickedTextureAsset.name : pickedSpriteKey) + "' on '" + spritePickEnt.name + "'.");
+          }
+        } else {
+          var spritePickRenderer = spritePickEnt && spritePickEnt.getComponent(SPRITE_RENDERER);
+          if (spritePickRenderer && pickedSpriteKey) {
+            snapshotNow("scene");
+            spritePickRenderer.spriteKey = pickedSpriteKey;
+            var pickedAsset = getSpriteAsset(pickedSpriteKey);
+            pushLog("log", "Set sprite to '" + (pickedAsset ? pickedAsset.name : pickedSpriteKey) + "' on '" + spritePickEnt.name + "'.");
+          }
         }
         editorState.spritePickerOpen = false;
         render();
@@ -901,6 +919,21 @@ let _lastSceneClick = { id: null, time: 0 };
         render();
         break;
       }
+      case "create-strokepath": {
+        if (!editorState.world) break;
+        snapshotNow("scene");
+        const entity = editorState.world.createEntity("Stroke Path");
+        entity.addComponent(TRANSFORM, new Transform());
+        entity.addComponent(STROKE_PATH, new StrokePath());
+        editorState.selectedId = entity.id;
+        editorState.selectedIds = [entity.id];
+        editorState.activeTool = "path";
+        pushLog("log", "Created Stroke Path with 2 starting points. Use the Path tool (P) to click and add more points, drag any point to adjust it, or click a segment to insert one between two points.");
+        editorState.openMenu = null;
+        editorState.openSubmenu = null;
+        render();
+        break;
+      }
       case "toggle-entity-active": {
         const entity = editorState.world && editorState.world.getEntity(editorState.selectedId);
         if (entity) {
@@ -1109,6 +1142,11 @@ let _lastSceneClick = { id: null, time: 0 };
           if (!entity.hasComponent(SHAPE_RENDERER)) {
             entity.addComponent(SHAPE_RENDERER, new ShapeRenderer());
             pushLog("log", "Added Shape Renderer to '" + entity.name + "'.");
+          }
+        } else if (componentName === "StrokePath") {
+          if (!entity.hasComponent(STROKE_PATH)) {
+            entity.addComponent(STROKE_PATH, new StrokePath());
+            pushLog("log", "Added Stroke Path to '" + entity.name + "'.");
           }
         } else if (componentName === "AudioSource") {
           if (!entity.hasComponent(AUDIO_SOURCE)) {
@@ -2058,6 +2096,11 @@ case "select-scene-file": {
     if (key === "o") {
       const hasNav = editorState.world && editorState.world.query(NAV_WORLD_2D).length;
       if (hasNav) editorState.activeTool = "nav-area";
+      render(); return;
+    }
+    if (key === "p") {
+      const hasStrokePath = editorState.world && editorState.world.query(STROKE_PATH).length;
+      if (hasStrokePath) editorState.activeTool = "path";
       render(); return;
     }
     if (e.key === " " || e.code === "Space") {
@@ -3165,6 +3208,16 @@ function applyFieldChange(field, inputEl) {
       value = null;
     } else {
       value = parseFloat(inputEl.value) || 0;
+    }
+    // StrokePath.smoothing is a 0-1 blend factor (see StrokePath.js's
+    // constructor clamp) — clamp here too so a typed value like "5"
+    // can't sneak past the Inspector into a component field the
+    // geometry code assumes is already 0-1 (StrokePathGeometry.js's
+    // resampleSmoothPoints re-clamps defensively, but doing it here as
+    // well keeps the Inspector's own displayed value honest instead of
+    // silently showing "5" while the curve behaves as if it were 1).
+    if (componentName === "StrokePath" && propName === "smoothing") {
+      value = Math.max(0, Math.min(1, value));
     }
   } else value = inputEl.value;
 

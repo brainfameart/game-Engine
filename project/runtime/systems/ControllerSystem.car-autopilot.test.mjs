@@ -41,7 +41,7 @@ function runToward(scene, system, target, frames=1) {
 {
   const system = new ControllerSystem();
   const scene = makeScene({rotation:0});
-  const target = {x:0,y:500};
+  const target = {x:0,y:80};
   let hadReverse = false;
   let startedTurning = false;
   let previousRotation = scene.entity.getComponent(TRANSFORM).rotation;

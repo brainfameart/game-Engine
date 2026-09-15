@@ -68,7 +68,7 @@
 // resolved caps object that function produces.
 export const DEFAULT_MAX_LIGHTS = 32;
 export const DEFAULT_MAX_OCCLUDERS = 24;
-export const MAX_RAYMARCH_STEPS = 48;
+export const MAX_RAYMARCH_STEPS = 200;
 // Freeform lights (typeId 5): each light's polygon outline is uploaded
 // as up to this many LOCAL-space {x,y} points, flattened into one big
 // per-light-slot array (see uPolyPoints below) rather than a real 2D
@@ -266,6 +266,11 @@ uniform vec2 uLightPos[${MAX_LIGHTS}];
 uniform int uLightTypeId[${MAX_LIGHTS}];      // 0 Directional, 1 Point, 2 Spot, 3 Area, 4 GodRays, 5 Freeform
 uniform vec3 uLightColor[${MAX_LIGHTS}];
 uniform float uLightIntensity[${MAX_LIGHTS}];
+uniform float uLightFlicker[${MAX_LIGHTS}];
+uniform float uLightFlickerSpeed[${MAX_LIGHTS}];
+uniform float uLightFlickerDuration[${MAX_LIGHTS}];
+uniform float uLightCoreSize[${MAX_LIGHTS}];
+uniform float uLightCoreVisible[${MAX_LIGHTS}];
 uniform float uLightRadius[${MAX_LIGHTS}];
 uniform float uLightAngle[${MAX_LIGHTS}];     // radians, full cone width
 uniform float uLightRotation[${MAX_LIGHTS}];  // radians
@@ -290,6 +295,43 @@ uniform float uOccLength[${MAX_OCCLUDERS}];
 uniform float uOccSoftness[${MAX_OCCLUDERS}];
 
 const float PI = 3.14159265359;
+
+// Physically-inspired light color response. The lighting buffer is a
+// multiplier, so keep the authored hue while gently desaturating only
+// the hottest parts of a light. Real emitters tend to become broader
+// spectrum at their brightest core, while the surrounding illumination
+// keeps more of the source color. The effect is deliberately subtle so
+// colored neon/lamps remain colored rather than turning white.
+float lightLuminance(vec3 c) {
+    return max(dot(max(c, vec3(0.0)), vec3(0.2126, 0.7152, 0.0722)), 0.0001);
+}
+
+vec3 realisticLightColor(vec3 color, float sourceHotness, float energy) {
+    vec3 safeColor = max(color, vec3(0.0));
+    float saturation = max(max(safeColor.r, safeColor.g), safeColor.b) -
+                       min(min(safeColor.r, safeColor.g), safeColor.b);
+    float coreWhite = clamp(sourceHotness * 0.12 + energy * 0.06, 0.0, 0.16);
+    // Preserve strongly colored sources: a high-saturation authored
+    // light gets less whitening than an already near-white light.
+    coreWhite *= 1.0 - 0.35 * clamp(saturation, 0.0, 1.0);
+    return mix(safeColor, vec3(lightLuminance(safeColor)), coreWhite);
+}
+
+// Natural source flicker: layered low-frequency sine waves with a tiny
+// deterministic variation per light. It is intentionally subtle so a
+// flickering lamp still illuminates continuously rather than strobing.
+// Duration 0 means forever; once a finite duration expires the light
+// returns to its authored intensity.
+float lightFlickerMultiplier(float time, float enabled, float speed, float duration, float seed) {
+    if (enabled < 0.5 || speed <= 0.0) return 1.0;
+    if (duration > 0.0 && time >= duration) return 1.0;
+    float t = time * speed;
+    float a = sin(t * 6.2831853 + seed * 5.17);
+    float b = sin(t * 10.9956 + seed * 11.73 + 1.7);
+    float c = sin(t * 3.7699 + seed * 19.41 + 0.4);
+    float variation = 0.72 * a + 0.20 * b + 0.08 * c;
+    return clamp(1.0 + variation * 0.12, 0.78, 1.12);
+}
 
 vec2 toLocal(vec2 p, vec2 center, float rotation) {
     vec2 d = p - center;
@@ -325,13 +367,14 @@ float radialFalloff(float distT) {
 // reads near-white-pink while its halo is saturated red) — a flat
 // single-color disc reads as fake because real light never holds one
 // flat hue all the way from source to edge.
-float radialHotness(float distT) {
-    const float HOT_T = 0.22;
+float radialHotness(float distT, float coreSize) {
+    float HOT_T = clamp(coreSize, 0.01, 1.0);
     float t = clamp(distT / HOT_T, 0.0, 1.0);
-    // Eased falloff (not linear) so the white-hot zone stays small and
-    // concentrated right at the source instead of washing out a third
-    // of the light's whole radius toward white.
-    return 1.0 - t * t;
+    // Real emitters have a concentrated source region, then a rapid
+    // transition into the softer colored glow. A cubic smooth profile
+    // avoids the flat disc look of a linear/low-order core.
+    float core = 1.0 - smoothstep(0.0, 1.0, t);
+    return core * core;
 }
 
 // Cheap 2D hash — used to break the perfectly-smooth analytic falloff
@@ -492,11 +535,32 @@ float quadShadowTest(vec2 pixelWorld, vec2 lightPos, vec2 occCenter, vec2 halfEx
     return opacity * edgeFade * lenFade * extraFadeOut;
 }
 
-float raymarchShadowTest(vec2 pixelWorld, vec2 lightPos, float maxDist) {
-    vec2 toLight = lightPos - pixelWorld;
-    float dist = length(toLight);
-    if (dist < 0.0001 || dist > maxDist) return 0.0;
-    vec2 dir = toLight / dist;
+float raymarchShadowTest(vec2 pixelWorld, vec2 lightPos, float maxDist, bool isDirectional, vec2 lightDir) {
+    vec2 toLight;
+    float dist;
+    vec2 dir;
+    if (isDirectional) {
+        // Directional light: rays are PARALLEL everywhere, so the march
+        // direction must be the light's fixed direction, never derived
+        // from (lightPos - pixelWorld). The old code faked a "far away
+        // point light" by placing lightPos at pixelWorld - dir * reach —
+        // but that re-centers lightPos under whichever pixel is
+        // currently being shaded, silently turning "far away" back into
+        // "always directly behind this exact pixel" and making the
+        // marched ray direction drift per-pixel instead of staying
+        // constant across the whole occluder/scene. That drift is what
+        // let a shadow bend onto the wrong (near/top) side of an
+        // object depending on its shape — passing the direction
+        // directly keeps it truly constant, matching an actual
+        // directional light.
+        dir = lightDir;
+        dist = maxDist;
+    } else {
+        toLight = lightPos - pixelWorld;
+        dist = length(toLight);
+        if (dist < 0.0001 || dist > maxDist) return 0.0;
+        dir = toLight / dist;
+    }
 
     // Bias the marched ray's START away from the shaded pixel itself
     // (a standard shadow-acne-style bias) so an occluder can never
@@ -519,9 +583,26 @@ float raymarchShadowTest(vec2 pixelWorld, vec2 lightPos, float maxDist) {
             if (o >= uOccluderCount) break;
             float opacity = uOccOpacity[o];
             if (opacity <= 0.0) continue;
+            // Shadow length is measured from this occluder's
+            // shadow-facing boundary to the shaded pixel along the
+            // existing ray direction, not from a marched sample to
+            // the occluder via its SDF. Compute the rectangle's support
+            // radius along that same ray so rotated casters use their
+            // actual boundary rather than an axis-aligned approximation.
             vec2 local = toLocal(sample, uOccPos[o], uOccRotation[o]);
             float softness = uOccSoftness[o];
             float sdf = boxSDF(local, uOccHalfExtents[o]);
+            vec2 localRayDir = vec2(
+                cos(uOccRotation[o]) * dir.x + sin(uOccRotation[o]) * dir.y,
+                -sin(uOccRotation[o]) * dir.x + cos(uOccRotation[o]) * dir.y
+            );
+            float boundaryOffset =
+                abs(localRayDir.x) * uOccHalfExtents[o].x +
+                abs(localRayDir.y) * uOccHalfExtents[o].y;
+            float shadowDistance =
+                -dot(pixelWorld - uOccPos[o], dir) - boundaryOffset;
+            float occReach = maxDist * max(0.0, uOccLength[o]);
+            if (shadowDistance > occReach) continue;
             if (sdf <= 0.0) {
                 occlusion = max(occlusion, opacity);
             } else if (softness > 0.0 && sdf <= softness) {
@@ -551,6 +632,7 @@ void main(void) {
         int typeId = uLightTypeId[i];
         vec3 color = uLightColor[i];
         float intensity = uLightIntensity[i];
+        intensity *= lightFlickerMultiplier(uTime, uLightFlicker[i], uLightFlickerSpeed[i], uLightFlickerDuration[i], float(i + 1));
         vec2 lightPos = uLightPos[i];
 
         float brightness = 0.0;
@@ -571,12 +653,12 @@ void main(void) {
                 float radius = uLightRadius[i];
                 float distT = clamp(dist / max(radius, 0.0001), 0.0, 1.0);
                 brightness = dist > radius ? 0.0 : radialFalloff(distT) * radialGrain(toPixel, radius);
-                hotness = dist > radius ? 0.0 : radialHotness(distT);
+                hotness = dist > radius ? 0.0 : radialHotness(distT, uLightCoreSize[i]);
             } else if (typeId == 2) {
                 float radius = uLightRadius[i];
                 float distT = clamp(dist / max(radius, 0.0001), 0.0, 1.0);
                 float radial = dist > radius ? 0.0 : radialFalloff(distT) * radialGrain(toPixel, radius);
-                hotness = dist > radius ? 0.0 : radialHotness(distT);
+                hotness = dist > radius ? 0.0 : radialHotness(distT, uLightCoreSize[i]);
 
                 float angleToPixel = atan(toPixel.y, toPixel.x);
                 float rel = angleToPixel - uLightRotation[i];
@@ -592,6 +674,8 @@ void main(void) {
                 brightness = radial * coneMask;
             } else if (typeId == 4) {
                 brightness = godRaysBrightness(toPixel, dist, uLightRadius[i], uLightRotation[i], uLightAngle[i] * 0.5);
+                float rayCoreT = clamp(uLightCoreSize[i], 0.02, 1.0);
+                hotness = dist > uLightRadius[i] ? 0.0 : 1.0 - smoothstep(0.0, uLightRadius[i] * rayCoreT, dist);
             } else if (typeId == 5) {
                 // Freeform: points are stored local to the light's own
                 // Transform position and NOT rotated (see components/
@@ -630,6 +714,8 @@ void main(void) {
                     }
                     float feather = max(uLightRadius[i], 0.0001);
                     brightness = smoothstep(0.0, feather, best);
+                    float coreDistance = length(toPixel);
+                    hotness = 1.0 - smoothstep(0.0, max(feather * uLightCoreSize[i], 0.0001), coreDistance);
                 }
             }
             }
@@ -637,6 +723,8 @@ void main(void) {
                 vec2 local = toLocal(pixelWorld, lightPos, 0.0);
                 vec2 halfSize = vec2(uLightWidth[i], uLightHeight[i]) * 0.5;
                 brightness = areaFalloff(local, halfSize, uLightRadius[i]);
+                float centerDistance = length(local / max(halfSize, vec2(0.0001)));
+                hotness = (1.0 - smoothstep(0.0, max(uLightCoreSize[i] * 0.75, 0.02), centerDistance)) * brightness;
             }
         }
 
@@ -651,13 +739,24 @@ void main(void) {
         float shadowAmount = 0.0;
         if (uLightCastsShadows[i] == 1 && uOccluderCount > 0) {
             float reach = uLightShadowReach[i];
+            vec2 dirLightDir = vec2(cos(uLightRotation[i]), sin(uLightRotation[i]));
             if (uShadowMode == 1) {
-                shadowAmount = raymarchShadowTest(pixelWorld, typeId == 0 ? pixelWorld - vec2(cos(uLightRotation[i]), sin(uLightRotation[i])) * reach : lightPos, reach);
+                shadowAmount = raymarchShadowTest(pixelWorld, lightPos, reach, typeId == 0, dirLightDir);
             } else {
                 for (int o = 0; o < ${MAX_OCCLUDERS}; o++) {
                     if (o >= uOccluderCount) break;
+                    // Anchor the synthetic "far away point light" to
+                    // THIS OCCLUDER, not to pixelWorld (see
+                    // raymarchShadowTest's isDirectional comment above
+                    // for why anchoring it to the shaded pixel instead
+                    // was the bug — same fix applies here). Anchoring
+                    // per-occluder still gives every pixel behind a
+                    // given occluder the same effectiveLightPos, which
+                    // is what makes that occluder's own shadow band
+                    // consistently parallel, matching a true directional
+                    // light instead of drifting per-pixel.
                     vec2 effectiveLightPos = typeId == 0
-                        ? pixelWorld - vec2(cos(uLightRotation[i]), sin(uLightRotation[i])) * reach
+                        ? uOccPos[o] - dirLightDir * reach
                         : lightPos;
                     float s = quadShadowTest(pixelWorld, effectiveLightPos, uOccPos[o], uOccHalfExtents[o], uOccRotation[o], uOccOpacity[o], uOccLength[o], uOccSoftness[o], reach, 1.0);
                     shadowAmount = max(shadowAmount, s);
@@ -699,13 +798,19 @@ void main(void) {
         // are present — either one alone is enough to justify full
         // white, so they saturate together rather than stacking past 1.
         float hotAmount = max(hotness * (1.0 - shadowAmount), overbrightHot);
+        hotAmount *= uLightCoreVisible[i];
         // Always use the user-authored color — the light's core stays the
         // chosen hue instead of bleaching to white. HDR brightness is still
         // carried by litMagnitude (which climbs past 1.0 for overbright
         // lights), so the "hot filament" feel is preserved through BRIGHTNESS
         // rather than hue-whitening. The hotAmount still drives extra magnitude
         // so an overbright light gets visibly brighter at its core.
-        vec3 litColor = color;
+        // Keep each light's energy spatially smooth and make the source
+        // response subtly broader-spectrum at its hottest points. This
+        // applies to every light type; the per-type brightness/falloff
+        // above remains unchanged.
+        float sourceHeat = max(hotAmount, clamp(litBrightness, 0.0, 1.0) * 0.08);
+        vec3 litColor = realisticLightColor(color, sourceHeat, overbrightHot);
         float litMagnitude = min(litBrightness, 1.0) + overbrightHot * 0.6 + hotAmount * 0.3;
         accumulatedLight += litColor * litMagnitude;
 
@@ -769,6 +874,11 @@ export function buildLightTextureFilter(gl) {
     uLightTypeId: new Int32Array(MAX_LIGHTS),
     uLightColor: new Float32Array(MAX_LIGHTS * 3),
     uLightIntensity: new Float32Array(MAX_LIGHTS),
+    uLightFlicker: new Float32Array(MAX_LIGHTS),
+    uLightFlickerSpeed: new Float32Array(MAX_LIGHTS),
+    uLightFlickerDuration: new Float32Array(MAX_LIGHTS),
+    uLightCoreSize: new Float32Array(MAX_LIGHTS),
+    uLightCoreVisible: new Float32Array(MAX_LIGHTS),
     uLightRadius: new Float32Array(MAX_LIGHTS),
     uLightAngle: new Float32Array(MAX_LIGHTS),
     uLightRotation: new Float32Array(MAX_LIGHTS),

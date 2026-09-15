@@ -129,8 +129,28 @@ export class NavAgent2D {
     vehicleSpeedSmoothing = 5,
     vehicleCornerSlowdown = 0.72,
     vehicleObstacleBrake = 0.9,
-    vehicleRecoveryTime = 1.35,
-    vehicleRecoveryReverseTime = 0.9,
+    vehicleRecoveryTime = 1.35, // seconds of being stuck (pushing into
+                                 // something with little progress, drifting
+                                 // off the planned lane, or on a collision
+                                 // course with something dead ahead) before
+                                 // the car commits to a recovery maneuver.
+                                 // At that point it does NOT just blindly
+                                 // back up: it compares a forward turn-
+                                 // around against a careful reverse (using
+                                 // this frame's own obstacle-scan clearance
+                                 // on both sides, plus a short rear raycast)
+                                 // and picks whichever is actually safer/
+                                 // faster — reversing if turning would clip
+                                 // something, turning if reverse is blocked,
+                                 // or a combined reverse-while-turning when
+                                 // that gets the car realigned fastest. See
+                                 // navDriveToward()'s recovery block in
+                                 // ScriptAPI.js for the full decision.
+    vehicleRecoveryReverseTime = 0.9, // seconds the chosen recovery
+                                       // maneuver runs before the car forces
+                                       // an immediate repath and resumes
+                                       // toward its goal from wherever the
+                                       // maneuver actually left it.
 
     // Navigation — same model as Unity's NavMeshAgent.areaMask: a
     // bitmask of which NavWorld2D cell areas (Ground, Water, Mud, ...)

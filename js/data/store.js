@@ -50,6 +50,13 @@
                 id: 'proj-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
                 name: name || 'Untitled Project',
                 template: tpl ? tpl.name : 'Blank Canvas',
+                // Template id (distinct from the display name above) — read
+                // by the editor's loadInitialProject() on this project's
+                // first open to decide whether to seed it from a template's
+                // bundled snapshot (see js/data/templates.js's hasBundledData)
+                // instead of the normal blank starter scene. Not used by the
+                // launcher itself past this point.
+                templateId: tpl ? tpl.id : 'blank',
                 version: window.ZenEngineVersion || '1.0.0',
                 platform: 'Web',
                 lastOpened: Date.now(),

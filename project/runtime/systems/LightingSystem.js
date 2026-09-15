@@ -118,11 +118,12 @@ export class LightingSystem extends System {
    *   actually execute Phase 1's offscreen render each frame via
    *   renderer.render().
    */
-  constructor(worldContainer, renderSystem, pixiApp) {
+  constructor(worldContainer, renderSystem, pixiApp, { editorPreview = false } = {}) {
     super();
     this.worldContainer = worldContainer;
     this.renderSystem = renderSystem || null;
     this.pixiApp = pixiApp || null;
+    this.editorPreview = !!editorPreview;
 
     this.quality = new LightingQuality();
 
@@ -326,20 +327,26 @@ export class LightingSystem extends System {
 
     try {
       const filter = this._lightTextureFilter;
-      // Computed BEFORE filling shadow uniforms (not after, like the old
-      // ordering) specifically so _fillOccluderUniforms/_fillLightUniforms
-      // can use THIS frame's stage scale, not last frame's, to keep
-      // shadow softness/reach a constant on-screen size (see their doc
-      // comments) — a one-frame-stale scale would visibly "swim" for a
-      // moment on every zoom step.
-      const stageScale = this._syncStageTransform(filter);
+      // stageScale (this function's return value) used to be threaded
+      // into _fillLightUniforms/_fillOccluderUniforms to shrink shadow
+      // reach/softness as the editor zoomed in — removed, see those two
+      // functions' own comments for why that was backwards. The call
+      // itself still has to run every frame regardless: it sets
+      // uStageOffset/uStageScale, the actual world-to-screen coordinate
+      // mapping Phase 1's shader needs, which is unrelated to the
+      // shadow-reach bug.
+      this._syncStageTransform(filter);
 
-      this._fillLightUniforms(lightEntities, occluders, stageScale);
-      this._fillOccluderUniforms(occluders, stageScale);
+      this._fillLightUniforms(lightEntities, occluders);
+      this._fillOccluderUniforms(occluders);
 
       filter.uniforms.uLightCount = Math.min(this._lightingCaps.MAX_LIGHTS, lightEntities.length);
       filter.uniforms.uOccluderCount = Math.min(this._lightingCaps.MAX_OCCLUDERS, occluders.length);
       filter.uniforms.uShadowMode = settings.shadowMode === ShadowMode.RAYMARCH ? 1 : 0;
+      // Editor and game rendering intentionally use the same raymarch quality.
+      // The editor is a visual authoring surface, so it must preview the
+      // lighting the player will actually see instead of using a reduced
+      // quality preset.
       filter.uniforms.uRaymarchSteps = Math.min(MAX_RAYMARCH_STEPS, Math.max(1, settings.raymarchSteps));
       filter.uniforms.uAmbientDarkness = Math.min(1, Math.max(0, settings.ambientDarkness));
       const nowMs = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -592,7 +599,7 @@ export class LightingSystem extends System {
    * Fills Phase 1's per-light uniform arrays — consumed by the shader
    * in LightTextureShaderSource.js.
    */
-  _fillLightUniforms(lightEntities, occluders, stageScale) {
+  _fillLightUniforms(lightEntities, occluders) {
     const u = this._lightTextureFilter.uniforms;
     const count = Math.min(this._lightingCaps.MAX_LIGHTS, lightEntities.length);
 
@@ -610,6 +617,11 @@ export class LightingSystem extends System {
       u.uLightColor[i * 3 + 1] = rgb[1];
       u.uLightColor[i * 3 + 2] = rgb[2];
       u.uLightIntensity[i] = Math.max(0, light.intensity);
+      u.uLightFlicker[i] = light.flicker ? 1 : 0;
+      u.uLightFlickerSpeed[i] = Math.max(0, light.flickerSpeed ?? 8);
+      u.uLightFlickerDuration[i] = Math.max(0, light.flickerDuration ?? 0);
+      u.uLightCoreSize[i] = Math.max(0.01, Math.min(1, light.coreSize ?? 0.22));
+      u.uLightCoreVisible[i] = light.coreVisible === false ? 0 : 1;
       u.uLightRadius[i] = Math.max(0.0001, light.radius || 0);
       u.uLightAngle[i] = ((light.angle ?? 45) * Math.PI) / 180;
       u.uLightRotation[i] = ((transform.rotation || 0) * Math.PI) / 180;
@@ -620,15 +632,31 @@ export class LightingSystem extends System {
       u.uLightShadowColor[i * 3 + 0] = shadowRgb[0];
       u.uLightShadowColor[i * 3 + 1] = shadowRgb[1];
       u.uLightShadowColor[i * 3 + 2] = shadowRgb[2];
-      // Divided by stageScale (see _fillOccluderUniforms for the full
-      // rationale): the shadow BAND's reach is a screen-space visual
-      // property, not a world-authored one, so it must shrink in world
-      // units as the editor zooms in (more screen px per world unit) to
-      // hold a constant on-screen length instead of visibly stretching
-      // out as the artist zooms in on a scene.
+      // Shadow reach is a WORLD-space physical property of the light
+      // (how far its shadows actually extend, in the same units as
+      // Transform.x/y, Collider sizes, etc.) — it must stay in true
+      // world units, exactly like uOccPos/uOccHalfExtents below, or the
+      // two stop being comparable inside the shader (quadShadowTest's
+      // farDist = distToOcc + apparentHalf directly adds reach to an
+      // occluder half-extent; raymarchShadowTest's occlusion cutoff
+      // compares reach-derived occReach against sdf, an occluder
+      // distance — both assume the same unit space).
+      //
+      // This used to be divided by stageScale on the theory that a
+      // shadow's reach is a "screen-space visual property" that should
+      // hold a constant ON-SCREEN length as the editor camera zooms.
+      // That's backwards for a physical shadow: a real shadow's length
+      // is fixed relative to the objects in the scene, not to the
+      // camera — zooming the editor's viewport in and out shouldn't
+      // make an object's shadow visibly shrink or grow, any more than
+      // zooming should shrink the object itself. The stageScale
+      // division was exactly why shadows got visibly shorter as you
+      // zoomed in: it was actively re-shrinking the world-space reach
+      // every time the screen-to-world ratio changed, on top of (and
+      // independently from) reach's actual Length/radius tuning.
       const worldReach =
         light.type === LightType.DIRECTIONAL ? DIRECTIONAL_SHADOW_BASE_DISTANCE : Math.max(0.0001, light.radius || 0);
-      u.uLightShadowReach[i] = worldReach / Math.max(0.0001, stageScale || 1);
+      u.uLightShadowReach[i] = worldReach;
 
       // Freeform polygon points, flattened into this light's slot of
       // the shared uPolyPoints array (see LightTextureShaderSource.js's
@@ -660,28 +688,17 @@ export class LightingSystem extends System {
 
   /**
    * Fills Phase 1's per-occluder uniform arrays — consumed by the
-   * shader in LightTextureShaderSource.js, EXCEPT `softness` is
-   * divided by the current editor/game viewport scale (stageScale)
-   * before upload.
-   *
-   * WHY: every occluder/shadow test in LightTextureShaderSource.js
-   * runs in WORLD space (vWorldCoord), which is scale-INDEPENDENT by
-   * construction — a given world position always has the same
-   * vWorldCoord no matter the current zoom. That's exactly right for
-   * the occluder's own box (halfWidth/halfHeight): it's a real object
-   * in the world and should get visibly bigger/smaller on screen as
-   * you zoom, same as its sprite. But the shadow's soft EDGE blur is a
-   * screen-space visual finish, not a world-authored dimension — left
-   * as a flat world-unit value, it reads as an imperceptibly thin line
-   * zoomed out and a huge blurry smear zoomed in. Dividing by
-   * stageScale keeps that edge a constant number of screen pixels
-   * regardless of viewport zoom, matching the requested Unity-like
-   * "shadow always looks the same crispness" behavior.
+   * shader in LightTextureShaderSource.js. All values (including
+   * `softness`) are plain world-unit values, same as uOccPos/
+   * uOccHalfExtents — see LightingSystem.js's _fillLightUniforms
+   * comment on uLightShadowReach for why: these are compared directly
+   * against other world-space quantities inside the shader (sdf,
+   * apparentHalf, etc.), so re-scaling any one of them by editor zoom
+   * would make it stop lining up with the others, not fix anything.
    */
-  _fillOccluderUniforms(occluders, stageScale) {
+  _fillOccluderUniforms(occluders) {
     const u = this._lightTextureFilter.uniforms;
     const count = Math.min(this._lightingCaps.MAX_OCCLUDERS, occluders.length);
-    const invScale = 1 / Math.max(0.0001, stageScale || 1);
 
     for (let i = 0; i < count; i++) {
       const occ = occluders[i];
@@ -692,7 +709,16 @@ export class LightingSystem extends System {
       u.uOccRotation[i] = (occ.rotationDeg * Math.PI) / 180;
       u.uOccOpacity[i] = occ.opacity;
       u.uOccLength[i] = occ.length;
-      u.uOccSoftness[i] = occ.softness * invScale;
+      // World-space, like uOccPos/uOccHalfExtents above and
+      // uLightShadowReach in _fillLightUniforms — previously divided by
+      // stageScale on the same "hold a constant on-screen size" theory
+      // that made shadow reach shrink while zooming in (see that
+      // uLightShadowReach comment for the full explanation). softness
+      // is compared directly against sdf (a world-space distance from
+      // the occluder's box) in both quadShadowTest's edge-fade and
+      // raymarchShadowTest's soft-distance accumulation, so it needs to
+      // be in the same world units those use, not re-scaled by zoom.
+      u.uOccSoftness[i] = occ.softness;
     }
   }
 

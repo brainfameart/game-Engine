@@ -8,6 +8,8 @@
  * RUNTIME-ONLY FILE.
  */
 
+import { MemoryWatchdog } from "./MemoryWatchdog.js";
+
 export class GameLoop {
   /**
    * @param {import('./World.js').World} world
@@ -21,6 +23,10 @@ export class GameLoop {
    * @param {number} [opts.targetFps] caps the game's own simulation rate —
    *   30, 60, 120, or 0/omitted for unlimited. See setTargetFps() below for
    *   the full rationale (Game Window Performance & FPS Priority spec).
+   * @param {PIXI.Application} [opts.pixiApp] enables the automatic memory
+   *   watchdog (see MemoryWatchdog.js) — without it, high heap usage is
+   *   never checked or reclaimed. Optional so a headless/test World
+   *   (no PIXI app at all) can still construct a GameLoop.
    */
   constructor(world, opts) {
     this.world = world;
@@ -32,6 +38,18 @@ export class GameLoop {
     this._rafHandle = null;
     this._tickFn = this._tick.bind(this);
     this.onAfterUpdate = (opts && opts.onAfterUpdate) || null;
+
+    // Automatic memory reclaim: as the game runs (repeated scene loads,
+    // spawned/destroyed entities, imported textures, etc.) JS heap usage
+    // can climb over a long session. Rather than letting it climb
+    // unchecked toward a browser out-of-memory tab crash, this watchdog
+    // periodically checks usage against the browser's OWN reported
+    // ceiling and, once usage gets high, runs a reclaim pass so memory
+    // comes back down — see MemoryWatchdog.js for exactly what it does
+    // and doesn't touch (nothing currently on screen is ever affected).
+    // pixiApp is optional: with no PIXI app (e.g. a headless/test World)
+    // the watchdog simply has nothing to do and update() no-ops.
+    this.memoryWatchdog = new MemoryWatchdog({ pixiApp: (opts && opts.pixiApp) || null });
 
     // Game Window Performance & FPS Priority: the game's own FPS
     // target — completely independent from (and never limited by) the
@@ -49,6 +67,7 @@ export class GameLoop {
     // engine cannot render faster than the display refreshes.
     this._minFrameMs = 0; // 0 = unlimited (every rAF tick runs)
     this.setTargetFps((opts && opts.targetFps) || 0);
+
 
     // Gameplay pause (see scene.pause()/scene.resume() in ScriptAPI.js,
     // wired through here by createGame() in runtime/index.js). Distinct
@@ -137,8 +156,33 @@ export class GameLoop {
     const dt = Math.min(0.1, (now - this._lastTime) / 1000); // clamp to avoid huge jumps after tab-out
     this._lastTime = now;
 
+    // Runs regardless of pause state — heap usage doesn't stop growing
+    // just because gameplay is paused (a paused menu can still be
+    // sitting on a large heap from whatever ran before), and the
+    // reclaim pass itself never touches gameplay state, so there's no
+    // reason to gate it on _paused.
+    this.memoryWatchdog.update(dt);
+
     if (!this._paused) {
-      this.world.update(dt);
+      // world.update() runs every system (physics, scripts, rendering,
+      // audio, ...) for this frame. Wrapped in try/catch as a last line
+      // of defense: ANY uncaught exception in here — not just the
+      // destroyed-texture case AssetManager.resolveTexture() now guards
+      // against directly, but literally any other bug in a system or a
+      // user script's onUpdate() — would otherwise propagate out of
+      // _tick, which is the requestAnimationFrame callback itself. Since
+      // the reschedule call (this._rafHandle = requestAnimationFrame(...)
+      // below) never runs once an exception has unwound past this point,
+      // the ENTIRE game freezes silently: no more frames, no more input
+      // handling, nothing — with no error visible anywhere except the
+      // browser console. Catching here means one bad frame logs an error
+      // and the game keeps running (possibly with that one frame's
+      // update skipped/partial) instead of the whole engine dying.
+      try {
+        this.world.update(dt);
+      } catch (err) {
+        console.error("[GameLoop] world.update() threw — frame skipped, engine kept running:", err);
+      }
       if (this.onAfterUpdate) this.onAfterUpdate();
       if (this.onTick) this.onTick(dt);
     } else if (this.scriptSystem) {

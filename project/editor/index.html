@@ -29,6 +29,16 @@
      available as window.ZenPersistence before any editor module runs,
      exactly like the other local engine vendor files above. -->
 <script src="../../js/data/ZenPersistence.js"></script>
+<!-- Bundled template project data (e.g. the "Platformer Kit" template's
+     real scenes/assets/scripts) — only used on a brand-new project's
+     very first open, to seed it instead of the blank starter scene.
+     See SceneViewport.js's loadInitialProject() and js/data/templates.js's
+     hasBundledData. Loaded the same way as ZenPersistence.js above: a
+     plain classic script populating a global (window.ZenTemplateData),
+     not the launcher's full templates.js/store.js (those are launcher-UI
+     only and this editor has no use for them). -->
+<script src="../../js/data/templates/platformer-starter.data.js"></script>
+<script src="../../js/data/templates/physics-sandbox.data.js"></script>
 <link rel="stylesheet" href="./styles/editor.css" />
 <script>
 // Early error buffer: collect errors BEFORE main.js loads so they can
@@ -131,13 +141,17 @@ window.__zengineDirtyCheck = null; // set by main.js once EditorState.js has loa
     }
   }
   function showFallback() {
-    var el = document.getElementById("app") || document.body;
-    el.innerHTML =
-      '<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;background:#1a1a2e;color:#fff;font-family:system-ui;text-align:center;padding:20px;">' +
-      '<h2 style="margin:0 0 8px;font-size:18px;">Editor failed to load</h2>' +
-      '<p style="margin:0 0 16px;color:#999;font-size:13px;max-width:340px;">A JavaScript module failed to load — this is usually a stale cache issue. Click Reload to force-refresh all engine files.</p>' +
-      '<button onclick="location.replace(location.pathname)" style="padding:8px 24px;background:#6366f1;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;">Reload</button>' +
-      "</div>";
+    // Previously replaced #app's entire contents with a blocking "Editor
+    // failed to load" + Reload-button screen. Removed per product
+    // decision: in practice this was firing on loads that were simply
+    // slow (cold CDN cache) rather than genuinely broken, and the editor
+    // would go on to render normally a few seconds later underneath a
+    // screen the person had no reason to see. The one silent, automatic
+    // cache-busting reload in reload() above still runs on a real
+    // module-load failure — this function just no longer takes over the
+    // screen on top of it. Errors are still visible in the editor's own
+    // console panel via window.__zengineEarlyLogs/ConsoleCapture.
+    console.error("Vaelis editor: a module failed to load after one automatic reload attempt. Leaving the current screen up rather than showing a blocking error screen.");
   }
   function handleError(msg) {
     if (!msg) return;
@@ -198,13 +212,13 @@ window.__zengineDirtyCheck = null; // set by main.js once EditorState.js has loa
      breathe (scale+brightness) so the frame never looks static
      even during a long cold-cache load. */
   .zbs-mark {
-    width: 220px; height: auto; position: relative;
+    width: 260px; height: auto; position: relative;
     display: flex; align-items: center; justify-content: center;
   }
   .zbs-mark::before {
     content: '';
     position: absolute; left: 50%; top: 50%;
-    width: 320px; height: 320px;
+    width: 360px; height: 360px;
     transform: translate(-50%, -50%);
     background: radial-gradient(circle, rgba(110,120,255,0.35), rgba(120,60,255,0.12) 45%, transparent 70%);
     filter: blur(18px);

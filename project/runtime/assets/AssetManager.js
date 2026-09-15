@@ -123,13 +123,44 @@ export function registerTexture(key, texture) {
  * key or any key that isn't a known built-in / imported asset resolves
  * to a visible magenta "missing texture" marker rather than a blank
  * white square, so gaps are obvious instead of silently invisible.
+ *
+ * Also defends against a DESTROYED cached texture — this is what fixes
+ * the "engine freezes when a texture in use gets deleted" bug. Deleting
+ * a sprite asset (AssetRegistry.deleteSpriteAsset -> clearTextureAsset)
+ * removes the cache entry AND calls texture.destroy(true) in the same
+ * synchronous step, so under normal timing a deleted key's very next
+ * resolveTexture() call is already a cache miss and falls through to
+ * the missing-texture marker below with no special-casing needed.
+ * This extra check exists for every OTHER path that could still hand
+ * back a dead texture: a caller (RenderSystem's StrokePath block, any
+ * future renderer) holding onto a texture reference from a previous
+ * tick across an editor-triggered delete that lands between ticks, a
+ * WebGL context loss, or any future code path that destroys a texture
+ * without going through clearTextureAsset. A destroyed BaseTexture has
+ * null internal GL resources, and PIXI throws when code (a Sprite's or
+ * SimpleMesh's `.texture` setter, geometry/UV recompute, etc.) touches
+ * certain properties on it — with no try/catch anywhere up the call
+ * chain to GameLoop's requestAnimationFrame tick, that throw stops the
+ * frame loop from ever rescheduling itself, which is the actual freeze.
+ * Checking `.destroyed` here, evicting the stale cache entry, and
+ * falling back to the (always-valid, never-user-deletable)
+ * missing-texture marker means EVERY situation that could hand a
+ * caller a dead texture degrades to a visible magenta placeholder
+ * instead of a frozen game, regardless of which code path caused it.
  * @param {string|null} key
  * @returns {PIXI.Texture}
  */
 export function resolveTexture(key) {
   if (!key) return resolveMissingTexture();
 
-  if (_textureCache.has(key)) return _textureCache.get(key);
+  if (_textureCache.has(key)) {
+    const cached = _textureCache.get(key);
+    const isDestroyed = !cached || cached.destroyed || (cached.baseTexture && cached.baseTexture.destroyed);
+    if (!isDestroyed) return cached;
+    // Stale/dead entry — evict it so nothing else can hand it out again,
+    // then fall through exactly as if this had been a cache miss.
+    _textureCache.delete(key);
+  }
 
   if (key === "square" || key === "capsule") {
     const graphics = buildPlaceholderTexture(key);
@@ -140,14 +171,25 @@ export function resolveTexture(key) {
 
   // Unknown key: not a built-in placeholder and not a registered
   // imported asset (e.g. scene references a sprite that hasn't loaded
-  // yet, or was deleted). Show the missing-texture marker rather than
-  // failing silently.
+  // yet, was deleted, or its cached texture was just evicted above as
+  // destroyed). Show the missing-texture marker rather than failing
+  // silently — or, in the pre-fix behavior, handing back a dead texture
+  // that would freeze the engine the moment something tried to use it.
   return resolveMissingTexture();
 }
 
 let _missingTextureCache = null;
 function resolveMissingTexture() {
-  if (_missingTextureCache) return _missingTextureCache;
+  // The missing-texture marker itself must never be handed back
+  // destroyed — generateTextureFromGraphics() falls back to
+  // PIXI.Texture.WHITE on failure (see its own try/catch), and
+  // PIXI.Texture.WHITE is a shared PIXI singleton that's never destroyed
+  // by this engine (clearTextureAsset explicitly skips it), so this
+  // cache can't itself become the thing that needs defending against.
+  if (_missingTextureCache && !_missingTextureCache.destroyed &&
+      !(_missingTextureCache.baseTexture && _missingTextureCache.baseTexture.destroyed)) {
+    return _missingTextureCache;
+  }
   const graphics = buildMissingTexture();
   _missingTextureCache = generateTextureFromGraphics(graphics, PIXI.Texture.WHITE);
   return _missingTextureCache;
@@ -155,6 +197,37 @@ function resolveMissingTexture() {
 
 export function clearTextureCache() {
   _textureCache.clear();
+  _missingTextureCache = null;
+}
+
+/**
+ * Evicts ONLY the procedurally-generated placeholder textures this
+ * engine builds itself — the missing-texture marker and the "square"/
+ * "capsule" built-in shapes — leaving every REAL imported sprite/frame
+ * texture in _textureCache completely untouched. Used by
+ * MemoryWatchdog.js's automatic high-memory reclaim pass: unlike
+ * clearTextureCache() (which wipes everything, including textures a
+ * live scene is actively displaying, and would make on-screen sprites
+ * pop to "missing" until something re-touches them) or clearTextureAsset
+ * (which permanently deletes ONE real user asset), this is completely
+ * safe to call at any time during live gameplay — it can only ever
+ * affect generated placeholders, which regenerate for free the instant
+ * resolveTexture() is asked for "square", "capsule", or a null/unknown
+ * key again. Destroys the underlying PIXI resources for each evicted
+ * placeholder (matching clearTextureAsset's own reasoning) so the
+ * actual GPU/CPU memory is freed, not just the cache reference.
+ */
+export function clearGeneratedPlaceholderTextures() {
+  for (const generatedKey of ["square", "capsule"]) {
+    const texture = _textureCache.get(generatedKey);
+    if (!texture) continue;
+    _textureCache.delete(generatedKey);
+    if (texture === PIXI.Texture.WHITE) continue; // shared singleton, never destroy
+    try { texture.destroy(true); } catch (err) { /* already gone */ }
+  }
+  if (_missingTextureCache && _missingTextureCache !== PIXI.Texture.WHITE) {
+    try { _missingTextureCache.destroy(true); } catch (err) { /* already gone */ }
+  }
   _missingTextureCache = null;
 }
 

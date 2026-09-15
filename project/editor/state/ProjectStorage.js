@@ -279,14 +279,21 @@ export async function loadProjectSnapshot(projectId, game) {
  * per-tab id ("__unsaved__") when the editor is opened directly
  * (outside the launcher, e.g. a bookmarked/dev URL) so autosave still
  * works standalone instead of silently doing nothing.
- * @returns {{ id: string, name: string|null, isLauncherProject: boolean }}
+ * Also reads `template` (set by the launcher's js/utils/nav.js
+ * openEditor() only for a template that has real bundled data to seed
+ * from — see its own doc comment) — the id of the template this
+ * project should be seeded from on its very first open, when no saved
+ * snapshot exists yet. See loadInitialProject() in SceneViewport.js.
+ *
+ * @returns {{ id: string, name: string|null, isLauncherProject: boolean, templateId: string|null }}
  */
 export function getProjectIdentityFromUrl() {
   const params = new URLSearchParams(window.location.search);
   const id = params.get("project");
   const name = params.get("name");
-  if (id) return { id, name, isLauncherProject: true };
-  return { id: "__unsaved__", name: name || null, isLauncherProject: false };
+  const templateId = params.get("template");
+  if (id) return { id, name, isLauncherProject: true, templateId };
+  return { id: "__unsaved__", name: name || null, isLauncherProject: false, templateId };
 }
 
 /**

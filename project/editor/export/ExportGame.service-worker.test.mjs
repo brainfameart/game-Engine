@@ -1,19 +1,19 @@
-import assert from 'node:assert/strict';
-import { buildServiceWorker } from './ExportGame.js';
+import assert from "node:assert/strict";
+import { buildServiceWorker } from "./ExportGame.js";
 
-const sw = buildServiceWorker(['./index.html', './runtime/index.js'], 'zenengine-game-test-v1');
+const sw = buildServiceWorker(["index.html", "main.js"], "zenengine-game-demo-v1");
 
-assert.match(sw, /const CACHE_NAME = "zenengine-game-test-v1"/);
-assert.match(sw, /const CACHE_PREFIX = "zenengine-game-"/);
-assert.match(sw, /n\.startsWith\(CACHE_PREFIX\) && n !== CACHE_NAME/);
-assert.match(sw, /caches\.open\(CACHE_NAME\).*cache\.match\(event\.request\)/s);
+assert.match(sw, /const CACHE_NAME = "zenengine-game-demo-v1"/);
+assert.match(sw, /const CACHE_PREFIX = "zenengine-game-demo-"/);
+assert.match(sw, /n\.indexOf\(CACHE_PREFIX\) === 0 && n !== CACHE_NAME/);
+assert.match(sw, /caches\.open\(CACHE_NAME\)/);
+assert.doesNotMatch(sw, /const CACHE_PREFIX = "zenengine-game-"/);
 assert.doesNotMatch(sw, /names\.filter\(function \(n\) \{ return n !== CACHE_NAME; \}\)/);
+assert.doesNotMatch(sw, /caches\.match\(event\.request\)/);
 
-// The generated PWA worker may delete an older cache only when that cache
-// belongs to the exported-game namespace. Engine/editor caches such as
-// zenengine-offline-v6 must remain untouched.
-const activation = sw.slice(sw.indexOf('self.addEventListener("activate"'));
-assert.match(activation, /startsWith\(CACHE_PREFIX\)/);
-assert.ok(!activation.includes('return n !== CACHE_NAME'), 'PWA worker must not delete arbitrary origin caches');
+// Different game slugs must produce non-overlapping cleanup prefixes.
+const swOther = buildServiceWorker(["index.html"], "zenengine-game-other-v1");
+assert.match(swOther, /const CACHE_PREFIX = "zenengine-game-other-"/);
+assert.doesNotMatch(swOther, /zenengine-game-demo-/);
 
-console.log('PASS: exported PWA service worker is cache-isolated from the engine/editor');
+console.log("Export service-worker same-origin isolation tests passed");

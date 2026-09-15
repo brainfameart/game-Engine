@@ -42,6 +42,7 @@ import { AUDIO_LISTENER } from "../../runtime/components/AudioListener.js";
 import { SPRITE_ANIMATION } from "../../runtime/components/SpriteAnimation.js";
 import { CHARACTER_CONTROLLER, ControllerType } from "../../runtime/components/CharacterController.js";
 import { LIGHT, LightType } from "../../runtime/components/Light.js";
+import { STROKE_PATH } from "../../runtime/components/StrokePath.js";
 
 // ─── Base Object — guaranteed on EVERY entity, known or not ─────────────────
 // This is what Unknown gets. Never extend this list with anything that
@@ -110,6 +111,7 @@ export const CAST_TARGETS = [
   { name: "Collider2D", key: COLLIDER_2D, prop: "collider", apiKind: "plain" },
   { name: "NavAgent", key: NAV_AGENT_2D, prop: "navAgent", apiKind: "plain" },
   { name: "NavAgent2D", key: NAV_AGENT_2D, prop: "navAgent", apiKind: "plain" },
+  { name: "StrokePath", key: STROKE_PATH, prop: "strokePath", apiKind: "plain" },
   { name: "Light", key: LIGHT, prop: "light", apiKind: "light", subtype: null },
   { name: "PointLight", key: LIGHT, prop: "light", apiKind: "light", subtype: LightType.POINT },
   { name: "DirectionalLight", key: LIGHT, prop: "light", apiKind: "light", subtype: LightType.DIRECTIONAL },

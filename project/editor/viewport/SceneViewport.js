@@ -26,6 +26,7 @@ import { drawLightGizmo, hitTestLightGizmo } from "./LightGizmo.js";
 import { drawAudioGizmo, hitTestAudioGizmo } from "./AudioGizmo.js";
 import { drawAudioListenerGizmo, hitTestAudioListenerGizmo } from "./AudioListenerGizmo.js";
 import { FreeformLightGizmo } from "./FreeformLightGizmo.js";
+import { StrokePathGizmo } from "./StrokePathGizmo.js";
 import { TransformGizmo } from "./TransformGizmo.js";
 import { editorState, pushLog } from "../state/EditorState.js";
 import { attachPixiDiagnostics } from "../state/ConsoleCapture.js";
@@ -36,6 +37,7 @@ import { COLLIDER_2D } from "../../runtime/components/Collider2D.js";
 import { LIGHT, LightType } from "../../runtime/components/Light.js";
 import { SPRITE_RENDERER, SpriteRenderer } from "../../runtime/components/SpriteRenderer.js";
 import { SHAPE_RENDERER } from "../../runtime/components/ShapeRenderer.js";
+import { STROKE_PATH } from "../../runtime/components/StrokePath.js";
 import { SPRITE_ANIMATION, SpriteAnimation, generateClipId } from "../../runtime/components/SpriteAnimation.js";
 import { CAMERA } from "../../runtime/components/Camera.js";
 import { RenderSystem } from "../../runtime/systems/RenderSystem.js";
@@ -49,7 +51,8 @@ import { NAV_WORLD_2D, navCellKey, setNavCellOverride, clearNavCellOverride, set
 import { NAV_AGENT_2D } from "../../runtime/components/NavAgent2D.js";
 import { drawNavWorldGizmo } from "./NavWorldGizmo.js";
 import { beginEdit, commitEdit, snapshotNow, resetHistory } from "../state/UndoManager.js";
-import { loadProjectSnapshot, getProjectIdentityFromUrl } from "../state/ProjectStorage.js";
+import { loadProjectSnapshot, applySnapshot, getProjectIdentityFromUrl } from "../state/ProjectStorage.js";
+import { getSafeRendererResolution } from "../../runtime/core/MobileViewport.js";
 
 // Click/box-select hit-box half-size (world units) for an "empty"
 // entity — Transform only, no Sprite/Shape Renderer, so there's no
@@ -76,6 +79,7 @@ let transformGizmo = null;
 let triangleColliderGizmo = null;
 let triangleShapeGizmo = null;
 let freeformLightGizmo = null;
+let strokePathGizmo = null;
 let game = null;
 let pixiCanvasHold = null;
 let renderFn = null;
@@ -259,8 +263,20 @@ export function isInitialProjectLoadDone() {
  * project that has never been saved has no snapshot yet, which is
  * expected and not an error — loadProjectSnapshot() still resets the
  * shared scripts/layers/tags registries to clean defaults in that
- * case (see its own doc comment), it just keeps the blank starter
- * scene initScenes() already loaded for the actual entities/scenes.
+ * case (see its own doc comment).
+ *
+ * TEMPLATE SEEDING: when there's no saved snapshot AND the launcher
+ * opened this project with a `template` id (see getProjectIdentityFromUrl()
+ * — only set for templates with real bundled data, e.g. js/data/templates/
+ * platformer-starter.data.js), that bundled data is applied via
+ * applySnapshot() here instead of leaving the blank starter scene
+ * initScenes() already loaded. This runs exactly once: the FIRST time
+ * that project is opened. Every open after that has its own real saved
+ * snapshot (autosave writes one within a minute — see
+ * ProjectStorage.js's startAutosave()), so loadProjectSnapshot() finds
+ * it on every later visit and this branch is never reached again, even
+ * though the URL's `template` param may still be present (bookmarked/
+ * reloaded links keep whatever query string they were opened with).
  *
  * @param {() => void} render editor's root render(), to refresh the UI
  *   once the (async) load finishes
@@ -272,10 +288,19 @@ async function loadInitialProject(render) {
     return;
   }
   try {
-    const snapshot = await loadProjectSnapshot(identity.id, game);
+    let snapshot = await loadProjectSnapshot(identity.id, game);
+    let seededFromTemplate = false;
+    if (!snapshot && identity.templateId && window.ZenTemplateData && window.ZenTemplateData[identity.templateId]) {
+      snapshot = window.ZenTemplateData[identity.templateId];
+      await applySnapshot(game, snapshot);
+      seededFromTemplate = true;
+    }
     if (snapshot) {
-      editorState.projectName = snapshot.projectName || identity.name || editorState.projectName;
-      // applySnapshot() (inside loadProjectSnapshot) already restored
+      editorState.projectName = seededFromTemplate
+        ? (identity.name || snapshot.projectName || editorState.projectName)
+        : (snapshot.projectName || identity.name || editorState.projectName);
+      // applySnapshot() (inside loadProjectSnapshot, or the direct call
+      // above for a template seed) already restored
       // editorState.selectedId/selectedIds/projectFolder from the
       // snapshot's own `ui` block — but syncAfterExternalSceneChange()
       // below unconditionally resets selection to the scene's Main
@@ -283,7 +308,9 @@ async function loadInitialProject(render) {
       // its other caller). Capture the snapshot's real selection here
       // and re-apply it after, so a project load restores exactly what
       // was selected/scrolled-to rather than always snapping back to
-      // the Main Camera on every reload.
+      // the Main Camera on every reload. A template's bundled snapshot
+      // has no `ui` block (see platformer-starter.data.js), so this is
+      // simply a no-op fallback to the Main Camera in that case.
       const restoredSelectedId = editorState.selectedId;
       const restoredSelectedIds = editorState.selectedIds;
       syncAfterExternalSceneChange();
@@ -291,7 +318,9 @@ async function loadInitialProject(render) {
         editorState.selectedId = restoredSelectedId;
         editorState.selectedIds = restoredSelectedIds;
       }
-      pushLog("log", "Loaded '" + (snapshot.projectName || identity.name || "project") + "' from your last session.");
+      pushLog("log", seededFromTemplate
+        ? "Started '" + (identity.name || snapshot.projectName || "project") + "' from the " + snapshot.projectName + " template."
+        : "Loaded '" + (snapshot.projectName || identity.name || "project") + "' from your last session.");
     } else if (identity.name) {
       editorState.projectName = identity.name;
     }
@@ -352,7 +381,9 @@ function createViewport(mount, render) {
       width: w, height: h,
       backgroundColor: 0x282828,
       autoDensity: true,
-      resolution: window.devicePixelRatio || 1,
+      // Match the runtime renderer's normal high-DPI policy so the editor
+      // preview is visually representative of Play Mode/exported games.
+      resolution: getSafeRendererResolution(w, h),
     };
     // Stage 1: WebGL
     if (PIXI.utils.isWebGLSupported()) {
@@ -364,7 +395,7 @@ function createViewport(mount, render) {
     catch (_) { /* fall through to null stub */ }
     // Stage 3: No renderer available — log and leave pixiApp null.
     _pixiInitFailed = true;
-    console.warn("[ZenEngine] No PIXI renderer available (no WebGL or Canvas 2D). Scene viewport will be disabled.");
+    console.warn("[Vaelis] No PIXI renderer available (no WebGL or Canvas 2D). Scene viewport will be disabled.");
   })();
 
   if (!pixiApp) return; // bail out gracefully — editor UI still works
@@ -493,6 +524,7 @@ function createViewport(mount, render) {
   triangleColliderGizmo = new TriangleColliderGizmo(gizmoContainer);
   triangleShapeGizmo = new TriangleShapeGizmo(gizmoContainer);
   freeformLightGizmo = new FreeformLightGizmo(gizmoContainer);
+  strokePathGizmo = new StrokePathGizmo(gizmoContainer);
 
   viewportCamera = new ViewportCamera(pixiApp, pixiApp.stage);
   viewportCamera.onZoomChange((percent) => {
@@ -576,6 +608,11 @@ function createViewport(mount, render) {
       const selected = editorState.world ? editorState.world.getEntity(editorState.selectedId) : null;
       const light = selected ? selected.getComponent(LIGHT) : null;
       freeformLightGizmo.draw(selected, light, _worldPerPixel());
+    }
+    if (strokePathGizmo) {
+      const selected = editorState.world ? editorState.world.getEntity(editorState.selectedId) : null;
+      const strokePath = selected ? selected.getComponent(STROKE_PATH) : null;
+      strokePathGizmo.draw(selected, strokePath, _worldPerPixel());
     }
     // Keep the translate/scale/rotate gizmo's constant-SCREEN size in
     // sync live during an active zoom gesture too — same reasoning as
@@ -961,6 +998,67 @@ function attachGizmoPointerEvents(mount) {
       }
     }
 
+    // StrokePath point handles — same priority tier and interaction
+    // convention as the Freeform Light handles just above (drag a
+    // point, alt-click/right-click to remove, click a segment to
+    // insert), but these stay live regardless of which tool is
+    // active — including the dedicated "path" tool below, whose own
+    // click-to-APPEND behavior only kicks in once none of these
+    // "adjust an existing point" hits land first. That ordering
+    // matters: with the Path tool active, clicking an existing handle
+    // should still grab it to reposition, not append a duplicate
+    // point on top of it.
+    {
+      const world = clientToWorld(e.clientX, e.clientY);
+      const selected = editorState.world ? editorState.world.getEntity(editorState.selectedId) : null;
+      const transform = selected ? selected.getComponent(TRANSFORM) : null;
+      const strokePath = selected ? selected.getComponent(STROKE_PATH) : null;
+      if (transform && strokePath) {
+        const vertexIndex = strokePathGizmo.hitTest(world.x, world.y, _worldPerPixel());
+        if (vertexIndex !== null) {
+          if (e.altKey) {
+            snapshotNow("scene");
+            strokePathGizmo.removePoint(strokePath, vertexIndex);
+            e.preventDefault();
+            e.stopPropagation();
+            if (renderFn) renderFn();
+            return;
+          }
+          beginEdit("scene");
+          strokePathGizmo.beginDrag(vertexIndex, transform);
+          try { el.setPointerCapture(e.pointerId); } catch (err) {}
+          e.preventDefault();
+          e.stopPropagation();
+          return;
+        }
+        const edgeHit = strokePathGizmo.hitTestEdge(world.x, world.y, _worldPerPixel());
+        if (edgeHit) {
+          snapshotNow("scene");
+          strokePathGizmo.insertPoint(strokePath, edgeHit.afterIndex, edgeHit.x, edgeHit.y, transform);
+          e.preventDefault();
+          e.stopPropagation();
+          if (renderFn) renderFn();
+          return;
+        }
+        // Path tool: a click that landed on neither an existing point
+        // nor a segment (both handled above) appends a brand new point
+        // at the END of the path instead — this is what actually lets
+        // the user "draw" the path by clicking a sequence of spots,
+        // same tool-gated pattern as the Tile/Erase/Nav paint tools
+        // elsewhere in this file (only fires while THIS tool is
+        // active, so clicking around with Translate/Rotate/Scale
+        // selected never accidentally grows the path).
+        if (editorState.activeTool === "path") {
+          snapshotNow("scene");
+          strokePathGizmo.appendPoint(strokePath, world.x, world.y, transform);
+          e.preventDefault();
+          e.stopPropagation();
+          if (renderFn) renderFn();
+          return;
+        }
+      }
+    }
+
     // Gizmo dragging is exclusive to translate/scale/rotate — but
     // click-to-select on a sprite should work no matter which tool is
     // active (including "pan"), same as every other editor. This used
@@ -1091,6 +1189,16 @@ function attachGizmoPointerEvents(mount) {
       refreshGizmos();
       return;
     }
+    if (strokePathGizmo.isDragging()) {
+      const selected = editorState.world ? editorState.world.getEntity(editorState.selectedId) : null;
+      const strokePath = selected ? selected.getComponent(STROKE_PATH) : null;
+      if (!strokePath) return;
+      const world = clientToWorld(e.clientX, e.clientY);
+      strokePathGizmo.updateDrag(world.x, world.y, strokePath);
+      syncSpriteRender();
+      refreshGizmos();
+      return;
+    }
 
     if (triangleColliderGizmo.isDragging()) {
       const selected = editorState.world ? editorState.world.getEntity(editorState.selectedId) : null;
@@ -1202,6 +1310,13 @@ function attachGizmoPointerEvents(mount) {
     }
     if (freeformLightGizmo.isDragging()) {
       freeformLightGizmo.endDrag();
+      commitEdit("scene");
+      try { el.releasePointerCapture(e.pointerId); } catch (err) {}
+      if (renderFn) renderFn();
+      return;
+    }
+    if (strokePathGizmo.isDragging()) {
+      strokePathGizmo.endDrag();
       commitEdit("scene");
       try { el.releasePointerCapture(e.pointerId); } catch (err) {}
       if (renderFn) renderFn();

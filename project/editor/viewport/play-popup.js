@@ -265,7 +265,7 @@ async function boot() {
     return;
   }
 
-  const { sceneData, spriteAssets, audioAssets, gameFps } = payload;
+  const { sceneData, spriteAssets, audioAssets, gameFps, navAreaNames } = payload;
 
   // Register real textures BEFORE the scene loads, so sprite entities
   // resolve to the actual imported images on their very first frame
@@ -292,7 +292,7 @@ async function boot() {
   });
   mount.appendChild(pixiApp.view);
 
-  const game = createGame({ pixiApp, followMainCamera: true });
+  const game = createGame({ pixiApp, followMainCamera: true, navAreaNames });
 
   // Game Window Performance & FPS Priority: the game's own FPS target
   // is completely independent from the editor's — set directly on the

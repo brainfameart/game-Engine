@@ -551,7 +551,7 @@ export class ScriptSystem {
 
       const factory = new Function(
         "findFirst", "findAll", "findWithTag", "findFirstWithTag", "findAllWithTag", "findById", "findInRadius",
-        "scene", "physics", "input", "mouse", "touch", "time", "random", "mathx", "global", "save", "debug",
+        "scene", "physics", "input", "mouse", "touch", "time", "random", "mathx", "smoothstep", "global", "save", "debug",
         "sendMessage", "broadcastMessage", "spawn", "wait", "cancelWait", "repeat", "cancelRepeat", "nav",
         "console", "Math", "__ctx",
         '"use strict";\n' + source + '\n' +
@@ -705,7 +705,7 @@ export class ScriptSystem {
       if (isClone) context._isClone = true;
       const handlers = factory(
         g.findFirst, g.findAll, g.findWithTag, g.findFirstWithTag, g.findAllWithTag, g.findById, g.findInRadius,
-        g.scene, g.physics, g.input, g.mouse, g.touch, g.time, g.random, g.mathx, g.global, g.save, g.debug,
+        g.scene, g.physics, g.input, g.mouse, g.touch, g.time, g.random, g.mathx, g.smoothstep, g.global, g.save, g.debug,
         g.sendMessage, g.broadcastMessage, g.spawn, g.wait, g.cancelWait, g.repeat, g.cancelRepeat, g.nav,
         console, Math, context
       );

@@ -24,6 +24,7 @@ import { editorState, pushLog } from "../state/EditorState.js";
 import { getAllScenesData } from "../../runtime/scene/SceneManager.js";
 import { notifyPlayWindowChanged } from "../state/FocusScheduler.js";
 import { getEngineSettings } from "../state/EngineSettings.js";
+import { getNavAreaNames } from "../state/NavAreas.js";
 
 let playWin = null;
 
@@ -121,8 +122,11 @@ export function openPlayWindow(game) {
   // of open/reuse timing. gameFps travels the same way — see
   // EngineSettings.js; play-popup.js applies it to GameLoop's
   // targetFps so the game's own frame rate is never coupled to
-  // whatever the editor happens to be doing.
-  window.__ZENGINE_PLAY_PAYLOAD__ = { sceneData, allScenes, width, height, spriteAssets, audioAssets, gameFps: getEngineSettings().gameFps };
+  // whatever the editor happens to be doing. navAreaNames is the Edit →
+  // Nav Areas… name registry (see editor/state/NavAreas.js) — passed
+  // through so nav.areaIndex()/nav.areaMask() resolve the same names
+  // in Play mode that the editor shows everywhere else.
+  window.__ZENGINE_PLAY_PAYLOAD__ = { sceneData, allScenes, width, height, spriteAssets, audioAssets, gameFps: getEngineSettings().gameFps, navAreaNames: getNavAreaNames() };
 
   if (isPlayWindowOpen()) {
     playWin.location.reload();
