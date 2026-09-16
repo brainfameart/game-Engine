@@ -80,7 +80,7 @@ const ENGINE_OBJECTS = [
   // colored via ENGINE_MEMBERS below, e.g. this.state.current, but the
   // object name itself — state/ear/collider — never got the
   // zen-token-object color the other this.<sub-object> names all get.
-  "state", "ear", "collider", "navAgent", "myTouch", "strokePath",
+  "state", "ear", "collider", "navAgent", "myTouch", "strokePath", "shadowCaster",
 ];
 
 // Cast-target type names recognized after `as` / inside `as ( … )` — kept
@@ -153,6 +153,10 @@ const ENGINE_MEMBERS = [
   "play", "stop", "playing", "currentClip", "currentFrame", "totalFrames",
   // Camera
   "zoom", "shake", "renderToSprite", "follow", "stopFollow", "backgroundColor", "offsetX", "offsetY",
+  "aspectMode", "landscapeWidth", "landscapeHeight", "portraitWidth", "portraitHeight",
+  "squareSize", "customWidth", "customHeight", "enablePseudo3D",
+  "scalingMode", "keepHeight", "aspectRatioLock", "allowStretching",
+  "letterboxing", "pillarboxing", "barColor", "integerScaling",
   // Audio
   "volume", "pitch", "playOnce",
   // Scene
@@ -191,6 +195,14 @@ const ENGINE_MEMBERS = [
   "shapeType", "fillColor", "outlineEnabled", "outlineColor", "outlineWidth",
   // Light
   "intensity", "radius", "angle", "castsOnWorld", "castShadows", "shadowColor", "shadowStrength", "flicker", "flickerSpeed", "flickerDuration", "coreSize", "coreVisible",
+  // Shadow Caster (this.shadowCaster.* — see ShadowCasterAPI.js). enabled/
+  // width/height/offsetX/offsetY/opacity already covered above (Light/
+  // Collider/Sprite/Speech Bubble) since this list is matched regardless
+  // of which object precedes the dot.
+  "length", "softness",
+  // Lighting Settings (scene.lighting.* — see LightingSettingsAPI.js).
+  // Scene-wide, needs no component.
+  "shadowMode", "raymarchSteps", "ambientDarkness", "glowStrength",
   // Stroke Path (this.strokePath.* — see StrokePathAPI.js). color/opacity/
   // radius/width/height are already covered above (Sprite/Collider) since
   // this list is matched regardless of which object precedes the dot.
@@ -209,6 +221,10 @@ const ENGINE_MEMBERS = [
   // isOver is shared with mouse (listed above); tappedOn is touch-only.
   "tappedOn", "swipe", "pinch", "anyJustStarted", "anyJustEnded",
   "justStarted", "justEnded", "startX", "startY",
+  // Lighting Settings sub-object name (scene.lighting.* — see
+  // LightingSettingsAPI.js). Grouped with touch's swipe/pinch above:
+  // same "nested sub-object name accessed as a member" pattern.
+  "lighting",
   // Time
   "deltaTime", "elapsed",
   // Random

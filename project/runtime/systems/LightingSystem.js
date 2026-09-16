@@ -129,6 +129,13 @@ export class LightingSystem extends System {
 
     this._filterBroken = false;
 
+    // Throttle state for the over-budget light/occluder warnings in
+    // update() below — see that method's own comment for why these
+    // exist (unthrottled console.warn every frame is a real perf cost
+    // and a console-spam problem for any scene that stays over budget).
+    this._lastWarnedLightCount = null;
+    this._lastWarnedOccluderCount = null;
+
     // Free-running clock (seconds since this LightingSystem was
     // created), used ONLY to drive God Rays' animated streak drift
     // (see uTime in LightTextureShaderSource.js). Uses performance.now()
@@ -300,29 +307,49 @@ export class LightingSystem extends System {
       return;
     }
 
+    // These two warnings fire every frame the scene stays over budget
+    // (update() runs every tick) — logged only ONCE per distinct
+    // over-budget count instead of unthrottled every frame, which
+    // would otherwise flood the console and cost real time in
+    // console I/O for the entire time a scene is over its light/
+    // occluder cap (e.g. a level with too many lights placed by
+    // mistake would tank performance via logging alone, on top of the
+    // actual capped-rendering behavior). Re-warns if the count changes
+    // (more lights added/removed) so the message stays accurate, but
+    // never repeats for the same count frame after frame.
     if (lightEntities.length > this._lightingCaps.MAX_LIGHTS) {
-      console.warn(
-        "[Lighting] Scene has " +
-          lightEntities.length +
-          " active lights but this device's shader only supports " +
-          this._lightingCaps.MAX_LIGHTS +
-          " at once. The extra " +
-          (lightEntities.length - this._lightingCaps.MAX_LIGHTS) +
-          " light(s) will be ignored — remove or disable some lights. (This device's GPU reports a smaller uniform budget than some others, so this cap can vary by machine.)"
-      );
+      if (this._lastWarnedLightCount !== lightEntities.length) {
+        this._lastWarnedLightCount = lightEntities.length;
+        console.warn(
+          "[Lighting] Scene has " +
+            lightEntities.length +
+            " active lights but this device's shader only supports " +
+            this._lightingCaps.MAX_LIGHTS +
+            " at once. The extra " +
+            (lightEntities.length - this._lightingCaps.MAX_LIGHTS) +
+            " light(s) will be ignored — remove or disable some lights. (This device's GPU reports a smaller uniform budget than some others, so this cap can vary by machine.)"
+        );
+      }
+    } else {
+      this._lastWarnedLightCount = null;
     }
 
     const occluders = this._collectOccluders(world);
     if (occluders.length > this._lightingCaps.MAX_OCCLUDERS) {
-      console.warn(
-        "[Lighting] Scene has " +
-          occluders.length +
-          " enabled Shadow Casters but this device's shader only supports " +
-          this._lightingCaps.MAX_OCCLUDERS +
-          " at once. The extra " +
-          (occluders.length - this._lightingCaps.MAX_OCCLUDERS) +
-          " will not cast shadows."
-      );
+      if (this._lastWarnedOccluderCount !== occluders.length) {
+        this._lastWarnedOccluderCount = occluders.length;
+        console.warn(
+          "[Lighting] Scene has " +
+            occluders.length +
+            " enabled Shadow Casters but this device's shader only supports " +
+            this._lightingCaps.MAX_OCCLUDERS +
+            " at once. The extra " +
+            (occluders.length - this._lightingCaps.MAX_OCCLUDERS) +
+            " will not cast shadows."
+        );
+      }
+    } else {
+      this._lastWarnedOccluderCount = null;
     }
 
     try {

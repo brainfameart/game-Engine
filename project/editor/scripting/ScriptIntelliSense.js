@@ -60,6 +60,7 @@ import { AUDIO_LISTENER } from "../../runtime/components/AudioListener.js";
 import { SPRITE_ANIMATION } from "../../runtime/components/SpriteAnimation.js";
 import { CHARACTER_CONTROLLER, ControllerType } from "../../runtime/components/CharacterController.js";
 import { LIGHT, LightType } from "../../runtime/components/Light.js";
+import { SHADOW_CASTER } from "../../runtime/components/ShadowCaster.js";
 import { STROKE_PATH, StrokePathJointMode, StrokePathCapMode } from "../../runtime/components/StrokePath.js";
 import { getAllSpriteAssets, getAllAudioAssets } from "../../runtime/assets/AssetRegistry.js";
 import { getSceneList } from "../../runtime/scene/SceneManager.js";
@@ -394,6 +395,23 @@ const CAMERA_API = [
   { label: "offsetX", detail: "Horizontal offset from the followed target (px). Change while following to shift look-ahead direction.", insert: "offsetX = ", kind: "Property" },
   { label: "offsetY", detail: "Vertical offset from the followed target (px). Change while following to shift look-ahead direction.", insert: "offsetY = ", kind: "Property" },
   { label: "renderToSprite(spriteEntity)", detail: "Render this camera's view onto a sprite's texture every frame (minimap / security feed). Pass null to stop.", insert: "renderToSprite(${1:findFirst(\"Minimap\")})", kind: "Method", snippet: true },
+  { label: "aspectMode", detail: '\'Landscape\' | \'Portrait\' | \'Square\' | \'Custom\' — which reference-resolution field set is active (read/write)', insert: 'aspectMode = "', kind: "Property" },
+  { label: "landscapeWidth", detail: "Reference resolution width in px, used when aspectMode is 'Landscape' (read/write)", insert: "landscapeWidth = ", kind: "Property" },
+  { label: "landscapeHeight", detail: "Reference resolution height in px, used when aspectMode is 'Landscape' (read/write)", insert: "landscapeHeight = ", kind: "Property" },
+  { label: "portraitWidth", detail: "Reference resolution width in px, used when aspectMode is 'Portrait' (read/write)", insert: "portraitWidth = ", kind: "Property" },
+  { label: "portraitHeight", detail: "Reference resolution height in px, used when aspectMode is 'Portrait' (read/write)", insert: "portraitHeight = ", kind: "Property" },
+  { label: "squareSize", detail: "Reference resolution size in px (1:1), used when aspectMode is 'Square' (read/write)", insert: "squareSize = ", kind: "Property" },
+  { label: "customWidth", detail: "Reference resolution width in px, used when aspectMode is 'Custom' (read/write)", insert: "customWidth = ", kind: "Property" },
+  { label: "customHeight", detail: "Reference resolution height in px, used when aspectMode is 'Custom' (read/write)", insert: "customHeight = ", kind: "Property" },
+  { label: "enablePseudo3D", detail: "Scene-wide fake-3D depth toggle — when true, Transform.z also scales rendered sprite size, not just draw order (read/write)", insert: "enablePseudo3D = ", kind: "Property" },
+  { label: "scalingMode", detail: "'Expand' | 'Fit' | 'Fill' | 'Stretch' — how the reference resolution maps onto the player's actual screen (read/write)", insert: 'scalingMode = "', kind: "Property" },
+  { label: "keepHeight", detail: "EXPAND-only: true keeps the reference HEIGHT exact, false keeps the reference WIDTH exact instead (read/write)", insert: "keepHeight = ", kind: "Property" },
+  { label: "aspectRatioLock", detail: "EXPAND-only safety override: true downgrades Expand to behave like Fit, so the aspect ratio is never altered (read/write)", insert: "aspectRatioLock = ", kind: "Property" },
+  { label: "allowStretching", detail: "STRETCH-only safety override: false (default) downgrades Stretch to Fit; true permits real non-uniform stretching (read/write)", insert: "allowStretching = ", kind: "Property" },
+  { label: "letterboxing", detail: "'Auto' | 'On' | 'Off' — horizontal bars (top/bottom), shown when Fit leaves vertical space unused (read/write)", insert: 'letterboxing = "', kind: "Property" },
+  { label: "pillarboxing", detail: "'Auto' | 'On' | 'Off' — vertical bars (left/right), shown when Fit leaves horizontal space unused (read/write)", insert: 'pillarboxing = "', kind: "Property" },
+  { label: "barColor", detail: 'Color painted into letterbox/pillarbox bars when shown, as a hex string, e.g. "#000000" (read/write)', insert: 'barColor = "#', kind: "Property" },
+  { label: "integerScaling", detail: "Rounds the computed device-fit scale down to the nearest whole integer (never below 1x) — keeps pixel art crisp (read/write)", insert: "integerScaling = ", kind: "Property" },
 ];
 
 // Keys of the camera.follow() options object literal.
@@ -472,6 +490,25 @@ const LIGHT_API = LIGHT_API_COMMON.concat([
   { label: "width",  detail: "Flat-lit rectangle width in px — Area lights only. Clamped to >= 0 (read/write)", insert: "width = ",     kind: "Property" },
   { label: "height", detail: "Flat-lit rectangle height in px — Area lights only. Clamped to >= 0 (read/write)", insert: "height = ",    kind: "Property" },
 ]);
+
+const SHADOW_CASTER_API = [
+  { label: "enabled",   detail: "Per-entity on/off for shadow casting — turn off to exclude this occluder (e.g. a see-through window) without removing the component (read/write)", insert: "enabled = ", kind: "Property" },
+  { label: "width",     detail: "Optional occluder width override in world px. Leave unset (null) to use this entity's real rendered sprite bounds (read/write)", insert: "width = ", kind: "Property" },
+  { label: "height",    detail: "Optional occluder height override in world px. Leave unset (null) to use this entity's real rendered sprite bounds (read/write)", insert: "height = ", kind: "Property" },
+  { label: "offsetX",   detail: "Occluder box center X offset from this entity's Transform, in LOCAL space — rotates with the entity (read/write)", insert: "offsetX = ", kind: "Property" },
+  { label: "offsetY",   detail: "Occluder box center Y offset from this entity's Transform, in LOCAL space — rotates with the entity (read/write)", insert: "offsetY = ", kind: "Property" },
+  { label: "opacity",   detail: "How dark this object's shadow reads: 0 = invisible, 1 = full ambient darkness. Multiplied with the casting light's own shadowStrength. Clamped to [0, 1] (read/write)", insert: "opacity = ", kind: "Property" },
+  { label: "length",    detail: "Shadow reach as a multiplier on the casting light's natural reach: 1 = normal, 0.5 = short contact shadow, 2 = long late-afternoon-sun shadow. Clamped to >= 0 (read/write)", insert: "length = ", kind: "Property" },
+  { label: "softness",  detail: "Soft shadow edge (penumbra) amount in world px. 0 = crisp hard edge. Clamped to >= 0 (read/write)", insert: "softness = ", kind: "Property" },
+];
+
+const SCENE_LIGHTING_API = [
+  { label: "shadowMode", detail: '"Quad" (cheap analytic shadows) or "Raymarch" (true per-pixel shadow occlusion, soft edges, higher GPU cost) (read/write)', insert: 'shadowMode = "', kind: "Property" },
+  { label: "raymarchSteps", detail: "Raymarch step count, 1-200 — only used when shadowMode is \"Raymarch\". Higher = smoother edges and fewer thin-occluder leaks, at higher GPU cost (read/write)", insert: "raymarchSteps = ", kind: "Property" },
+  { label: "ambientDarkness", detail: "How dark the world gets where no light reaches: 0 = no darkening, 1 = pitch black outside any light's reach. The main \"how moody does my lighting look\" dial (read/write)", insert: "ambientDarkness = ", kind: "Property" },
+  { label: "glowStrength", detail: "How visible a light's own glow is in open air, not just where it lands on a sprite. 0 = no open-air glow, 1 = normal, higher = brighter/further \"hot\" glow (read/write)", insert: "glowStrength = ", kind: "Property" },
+];
+
 
 const COLLIDER_API = [
   { label: "shape", detail: "'Box' | 'Circle' | 'Capsule' | 'Triangle' (read-only)", insert: "shape", kind: "Property" },
@@ -704,6 +741,7 @@ const SCENE_API = [
   { label: "pause()", detail: "Freeze gameplay: physics, scripts, animation, and audio all stop advancing until scene.resume() is called. Rendering stays responsive.", insert: "pause()", kind: "Method" },
   { label: "resume()", detail: "Resume gameplay after scene.pause(). Safe to call even if not currently paused.", insert: "resume()", kind: "Method" },
   { label: "isPaused", detail: "True while gameplay is frozen by scene.pause() (read-only)", insert: "isPaused", kind: "Property" },
+  { label: "lighting", detail: "Scene-wide lighting/shadow settings: scene.lighting.shadowMode, .raymarchSteps, .ambientDarkness, .glowStrength", insert: "lighting.", kind: "Module" },
 ];
 const PHYSICS_API = [
   { label: "raycast(x1, y1, x2, y2)", detail: "Cast a ray from (x1,y1) to (x2,y2). Returns { entity, point, normal, distance } on hit, or null if nothing was struck. entity is the hit object's script context (has .x .y .name .tag etc). point = {x,y} world position of the hit. normal = {x,y} surface direction (or null). distance = px from start to hit.", insert: "raycast(${1:x1}, ${2:y1}, ${3:x2}, ${4:y2})", kind: "Method", snippet: true },
@@ -1198,6 +1236,7 @@ const COMPONENT_KEY_NAMES = [
   { label: "Collider2D", detail: "Collider component" },
   { label: "Controller", detail: "Character controller component (any controller type)" },
   { label: "Light", detail: "Light component (any light type)" },
+  { label: "ShadowCaster", detail: "Shadow caster component" },
   { label: "StrokePath", detail: "Stroke path component" },
 ];
 
@@ -2004,6 +2043,7 @@ const COMPONENT_APIS = [
   { key: COLLIDER_2D, name: "collider", api: COLLIDER_API },
   { key: NAV_AGENT_2D, name: "navAgent", api: NAV_AGENT_API },
   { key: LIGHT, name: "light", api: LIGHT_API },
+  { key: SHADOW_CASTER, name: "shadowCaster", api: SHADOW_CASTER_API },
   { key: STROKE_PATH, name: "strokePath", api: STROKE_PATH_API },
 ];
 
@@ -2623,12 +2663,20 @@ function _provideCompletionItemsImpl(monaco, model, position) {
           isKnownSubObj = true;
           // Use type-aware API: only show properties valid for this light type.
           if (!keys || keys.has(LIGHT)) items = _lightApiForEntities(contextEntities);
+        } else if (subObj === "shadowCaster") {
+          isKnownSubObj = true;
+          if (!keys || keys.has(SHADOW_CASTER)) items = SHADOW_CASTER_API;
         } else if (subObj === "strokePath") {
           isKnownSubObj = true;
           if (!keys || keys.has(STROKE_PATH)) items = STROKE_PATH_API;
         } else if (subObj === "scene") {
           isKnownSubObj = true;
           items = SCENE_API;
+        } else if (subObj === "lighting") {
+          // scene.lighting.<partial> — scene-wide, needs no component
+          // (see LightingSettingsAPI.js's header for why).
+          isKnownSubObj = true;
+          items = SCENE_LIGHTING_API;
         } else if (subObj === "physics") {
           isKnownSubObj = true;
           items = PHYSICS_API;
@@ -2930,6 +2978,7 @@ function _buildHoverIndex() {
     collider: "Collider 2D",
     navAgent: "Nav Agent 2D",
     light: "Light",
+    shadowCaster: "Shadow Caster",
     strokePath: "Stroke Path",
   };
   for (const c of COMPONENT_APIS) {
@@ -2972,12 +3021,14 @@ function _buildHoverIndex() {
     ["state", STATE_API],
     ["myTouch", TOUCH_TRACK_API],
     ["light", LIGHT_API],
+    ["shadowCaster", SHADOW_CASTER_API],
     ["collider", COLLIDER_API],
     ["navAgent", NAV_AGENT_API],
     ["strokePath", STROKE_PATH_API],
     ["global", GLOBAL_APIS],
     ["save", SAVE_API],
     ["scene", SCENE_API],
+    ["scene.lighting", SCENE_LIGHTING_API],
     ["physics", PHYSICS_API],
     ["nav", NAV_API],
     ["nav waypoint", NAV_WAYPOINT_API],

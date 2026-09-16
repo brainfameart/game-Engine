@@ -72,6 +72,7 @@ const RUNTIME_FILES = [
   "EngineVersion.js",
   "assets/AssetManager.js",
   "assets/AssetRegistry.js",
+  "core/MemoryWatchdog.js",
   "components/AudioListener.js",
   "components/AudioSource.js",
   "components/Camera.js",
@@ -134,6 +135,7 @@ const RUNTIME_FILES = [
   "scripting/components/SpeechBubbleAPI.js",
   "scripting/components/SpriteAPI.js",
   "scripting/components/StateAPI.js",
+  "scripting/components/StrokePathAPI.js",
   "scripting/components/TextAPI.js",
   "scripting/components/TextInputAPI.js",
   "scripting/components/TouchTrackAPI.js",
@@ -180,8 +182,9 @@ const VENDOR_FILES = [
  * running (not a re-download, not a different version) is what gets
  * packed into the export. Works because /project/runtime and
  * /project/vendor are served as plain static files right alongside
- * the editor itself (see server.js) — export never needs network
- * access to anywhere outside this same origin.
+ * the editor itself (this whole app is deployed as one static site —
+ * see /DEPLOY.md) — export never needs network access to anywhere
+ * outside this same origin.
  * @param {string} relativePath relative to project/editor/export/ (this file)
  * @returns {Promise<Uint8Array>}
  */
@@ -280,6 +283,46 @@ function buildMainJs(opts) {
     "  for (const entry of AUDIO_MANIFEST) registerAudio(entry.key, entry.file);",
     "}",
     "",
+    "// Loads every scene the project has (scenes/index.json + each",
+    "// scenes/<id>.json) so scene.load('Name') works exactly like the",
+    "// editor's Play popup (see play-popup.js's",
+    "// game.loadAllScenes(payload.allScenes) call, which this mirrors),",
+    "// then loads the active scene's data through loadFromData() — NOT",
+    "// loadScene(url)/fetch, because only loadFromData() records the",
+    "// _initialSceneData snapshot scene.restart() needs (see",
+    "// runtime/index.js's _applyPendingSceneChange: a 'restart' with no",
+    "// snapshot silently does nothing). Falls back to the single",
+    "// scene.json file alone if the full index can't be fetched, so an",
+    "// older/partial export still boots (just without multi-scene support).",
+    "async function loadAllScenesOrFallback(game) {",
+    "  try {",
+    '    const indexRes = await fetch("./scenes/index.json");',
+    "    if (!indexRes.ok) throw new Error(\"no scenes/index.json (\" + indexRes.status + \")\");",
+    "    const index = await indexRes.json();",
+    "    const allScenes = await Promise.all(index.map(async function (entry) {",
+    '      const res = await fetch("./scenes/" + entry.file);',
+    "      const payload = await res.json();",
+    "      return { id: payload.id || entry.id, name: payload.name || entry.name, data: payload.data };",
+    "    }));",
+    "    if (!allScenes.length) throw new Error(\"scenes/index.json was empty\");",
+    "    game.loadAllScenes(allScenes);",
+    '    const activeRes = await fetch("./scene.json");',
+    "    const activeData = await activeRes.json();",
+    "    game.loadFromData(activeData);",
+    "    return;",
+    "  } catch (err) {",
+    '    console.warn("[game] Could not load the full scene list; scene.load() to other scenes will not work.", err);',
+    "  }",
+    "",
+    "  try {",
+    '    const res = await fetch("./scene.json");',
+    "    const data = await res.json();",
+    "    game.loadFromData(data);",
+    "  } catch (err) {",
+    '    console.error("[game] Failed to load scene.json", err);',
+    "  }",
+    "}",
+    "",
     "async function boot() {",
     '  const mount = document.getElementById("game-canvas");',
     "",
@@ -302,11 +345,7 @@ function buildMainJs(opts) {
     '  const game = createGame({ pixiApp, followMainCamera: true, gameId: document.title || "zenengine-game", navAreaNames: ' + JSON.stringify(navAreaNames) + ' });',
     "  game.loop.setTargetFps(" + JSON.stringify(gameFps || 0) + ");",
     "",
-    "  try {",
-    '    await game.loadScene("./scene.json");',
-    "  } catch (err) {",
-    '    console.error("[game] Failed to load scene.json", err);',
-    "  }",
+    "  await loadAllScenesOrFallback(game);",
     "",
     "  try { await game.saveReady; } catch (err) { /* start with an empty save */ }",
     "",
@@ -359,6 +398,45 @@ function buildIndexHtml(title, pwa, hasFavicon) {
   const pwaBody = pwa
     ? '  <script>\n    if ("serviceWorker" in navigator) {\n      window.addEventListener("load", function () { navigator.serviceWorker.register("./sw.js", { scope: "./", updateViaCache: "none" }); });\n    }\n  </script>\n'
     : "";
+  // Blank-screen safety net: if main.js (or anything it imports) fails
+  // to load — a 404'd module on a host that doesn't serve extensionless/
+  // nested paths correctly, a network blip, a corrupt upload — the
+  // player otherwise sees nothing at all and no error, with zero
+  // indication anything is wrong. This mirrors player/play.html's own
+  // recovery script's SHOW-FALLBACK half (a visible message with a
+  // Reload button) but deliberately skips its auto-reload-with-cache-
+  // bust half: that trick is meant for iterating against a live editor
+  // dev server, where a stale cached module is the likely cause and a
+  // silent reload is the right first move. A published, standalone
+  // export has no such dev server and no reason to believe a reload
+  // will fix anything a first load didn't — looping reloads here would
+  // just hide a real, permanent hosting problem behind repeated blank
+  // flashes instead of telling the player (or the developer debugging
+  // a bad upload) what actually happened. If game-canvas has gained a
+  // <canvas> child, boot() got far enough to matter and this never
+  // shows — see boot()'s own mount.appendChild(pixiApp.view) call.
+  const fallbackScript =
+    '<script>\n' +
+    '(function(){\n' +
+    '  function showFallback(detail){\n' +
+    '    var el=document.getElementById("game-canvas")||document.body;\n' +
+    '    el.innerHTML="<div style=\\"display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;background:#111;color:#fff;font-family:system-ui,sans-serif;text-align:center;padding:20px;box-sizing:border-box;\\">"+\n' +
+    '      "<h2 style=\\"margin:0 0 8px;font-size:18px;\\">Game failed to load</h2>"+\n' +
+    '      "<p style=\\"margin:0 0 16px;color:#999;font-size:13px;max-width:340px;\\">"+(detail||"A required file failed to load.")+" Try reloading — if this keeps happening, the upload may be missing files.</p>"+\n' +
+    '      "<button onclick=\\"location.reload()\\" style=\\"padding:8px 24px;background:#6366f1;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;\\">Reload</button>"+\n' +
+    '      "</div>";\n' +
+    '  }\n' +
+    '  window.addEventListener("error", function(e){\n' +
+    '    var msg=(e.error&&e.error.message)||e.message||"";\n' +
+    '    if (msg.indexOf("Unexpected end of input")!==-1||msg.indexOf("SyntaxError")!==-1||msg.toLowerCase().indexOf("failed to fetch")!==-1) showFallback();\n' +
+    '  }, true);\n' +
+    '  window.addEventListener("unhandledrejection", function(){ /* boot() catches its own promise chain; a stray rejection here is not fatal on its own */ });\n' +
+    '  setTimeout(function(){\n' +
+    '    var c=document.getElementById("game-canvas");\n' +
+    '    if (c && c.children.length===0) showFallback();\n' +
+    '  }, 12000);\n' +
+    '})();\n' +
+    '</script>\n';
   return (
     '<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="UTF-8" />\n' +
     '<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />\n' +
@@ -368,6 +446,7 @@ function buildIndexHtml(title, pwa, hasFavicon) {
     "<style>\n  html, body { width: 100%; height: 100%; min-height: 100%; margin: 0; padding: 0; background: #000; overflow: hidden; overscroll-behavior: none; }\n" +
     "  #game-canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; height: 100dvh; overflow: hidden; touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }\n" +
     "  #game-canvas canvas { display: block; width: 100%; height: 100%; touch-action: none; -webkit-user-select: none; user-select: none; }\n</style>\n" +
+    fallbackScript +
     '</head>\n<body>\n  <div id="game-canvas"></div>\n  <script type="module" src="./main.js"></script>\n' +
     pwaBody +
     "</body>\n</html>\n"
@@ -525,16 +604,26 @@ export async function buildExport(game, options) {
   const zip = new JSZip();
 
   // --- 2. Runtime + vendor files, read straight from this same origin ---
+  // Fetched in parallel (not one at a time) — these are ~100+ small
+  // same-origin static files with no dependency on each other, so
+  // awaiting each individually before starting the next only adds
+  // round-trip latency for no benefit. Promise.all here can shave a
+  // noticeable chunk off export time, especially on a slower
+  // connection or a host that doesn't support HTTP/2 multiplexing.
   onProgress("Packing runtime files…");
   const runtimeFolder = zip.folder("runtime");
-  for (const relPath of RUNTIME_FILES) {
-    const bytes = await fetchLocalFile("../../runtime/" + relPath);
-    runtimeFolder.file(relPath, bytes);
-  }
-  for (const entry of VENDOR_FILES) {
-    const bytes = await fetchLocalFile("../../" + entry.src);
-    zip.file(entry.dest, bytes);
-  }
+  await Promise.all(
+    RUNTIME_FILES.map(async (relPath) => {
+      const bytes = await fetchLocalFile("../../runtime/" + relPath);
+      runtimeFolder.file(relPath, bytes);
+    })
+  );
+  await Promise.all(
+    VENDOR_FILES.map(async (entry) => {
+      const bytes = await fetchLocalFile("../../" + entry.src);
+      zip.file(entry.dest, bytes);
+    })
+  );
 
   // --- 3. Transcode + write used assets as real binary files ---
   const spriteManifest = [];

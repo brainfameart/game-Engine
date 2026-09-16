@@ -82,6 +82,9 @@ import { createColliderAPI } from "./components/ColliderAPI.js";
 import { createNavAgentAPI } from "./components/NavAgentAPI.js";
 import { LIGHT } from "../components/Light.js";
 import { createLightAPI } from "./components/LightAPI.js";
+import { SHADOW_CASTER } from "../components/ShadowCaster.js";
+import { createShadowCasterAPI } from "./components/ShadowCasterAPI.js";
+import { createLightingSettingsAPI } from "./components/LightingSettingsAPI.js";
 import { STROKE_PATH } from "../components/StrokePath.js";
 import { createStrokePathAPI } from "./components/StrokePathAPI.js";
 import { createStateAPI } from "./components/StateAPI.js";
@@ -2571,6 +2574,9 @@ class EntityContext {
     // this.collider, which is read-only).
     this.navAgent    = entity.hasComponent(NAV_AGENT_2D)         ? createNavAgentAPI(entity)    : undefined;
     this.light       = entity.hasComponent(LIGHT)                ? createLightAPI(entity)       : undefined;
+    // this.shadowCaster — component-gated like everything else above.
+    // See ShadowCasterAPI.js for why every field here is read/write.
+    this.shadowCaster = entity.hasComponent(SHADOW_CASTER)       ? createShadowCasterAPI(entity) : undefined;
     this.strokePath  = entity.hasComponent(STROKE_PATH)          ? createStrokePathAPI(entity)  : undefined;
     // this.ear — component-gated like everything else above.
     this.ear         = entity.hasComponent(AUDIO_LISTENER)       ? createAudioListenerAPI(entity, this._scriptApi) : undefined;
@@ -3822,6 +3828,10 @@ export class ScriptAPI {
         get isPaused() {
           return self._isPausedFn ? self._isPausedFn() : false;
         },
+        // scene.lighting.* — scene-wide LightingSettings, see
+        // LightingSettingsAPI.js's header for why this lives here
+        // instead of behind a per-entity this.<name> sub-object.
+        lighting: createLightingSettingsAPI(self.world),
       },
       physics: {
         /**

@@ -42,6 +42,7 @@ import { AUDIO_LISTENER } from "../../runtime/components/AudioListener.js";
 import { SPRITE_ANIMATION } from "../../runtime/components/SpriteAnimation.js";
 import { CHARACTER_CONTROLLER, ControllerType } from "../../runtime/components/CharacterController.js";
 import { LIGHT, LightType } from "../../runtime/components/Light.js";
+import { SHADOW_CASTER } from "../../runtime/components/ShadowCaster.js";
 import { STROKE_PATH } from "../../runtime/components/StrokePath.js";
 
 // ─── Base Object — guaranteed on EVERY entity, known or not ─────────────────
@@ -119,6 +120,7 @@ export const CAST_TARGETS = [
   { name: "AreaLight", key: LIGHT, prop: "light", apiKind: "light", subtype: LightType.AREA },
   { name: "GodRaysLight", key: LIGHT, prop: "light", apiKind: "light", subtype: LightType.GOD_RAYS },
   { name: "FreeformLight", key: LIGHT, prop: "light", apiKind: "light", subtype: LightType.FREEFORM },
+  { name: "ShadowCaster", key: SHADOW_CASTER, prop: "shadowCaster", apiKind: "plain" },
   // Rigidbody — bare name and every BodyType-narrowed alias.
   { name: "Rigidbody", key: RIGIDBODY_2D, prop: "rigidbody", apiKind: "rigidbody", subtype: null },
   { name: "Rigidbody2D", key: RIGIDBODY_2D, prop: "rigidbody", apiKind: "rigidbody", subtype: null },

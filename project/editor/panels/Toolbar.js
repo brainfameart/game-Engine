@@ -110,12 +110,15 @@ export function renderToolbar() {
     '<div class="play-controls-wrap"><div class="play-group">' +
     '<button class="play-btn' +
     (editorState.isPlaying ? " active" : "") +
-    '" data-action="toggle-play">' +
+    '" data-action="toggle-play" title="' + (editorState.isPlaying ? "Stop" : "Play") + '">' +
     icon("play", 13) +
     "</button>" +
     '<button class="play-btn' +
     (editorState.isPaused ? " paused" : "") +
-    '" data-action="toggle-pause">' +
+    '"' + (editorState.isPlaying ? "" : " disabled") +
+    ' data-action="toggle-pause" title="' +
+    (editorState.isPlaying ? (editorState.isPaused ? "Resume" : "Pause") : "Pause (start Play first)") +
+    '">' +
     icon("pause", 13) +
     "</button>" +
     "</div></div>" +

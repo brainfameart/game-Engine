@@ -33,6 +33,14 @@ const CAMERA_MEMBERS = new Set([
   "x", "y",
   "follow", "stopFollow",
   "offsetX", "offsetY",
+  "aspectMode",
+  "landscapeWidth", "landscapeHeight",
+  "portraitWidth", "portraitHeight",
+  "squareSize",
+  "customWidth", "customHeight",
+  "enablePseudo3D",
+  "scalingMode", "keepHeight", "aspectRatioLock", "allowStretching",
+  "letterboxing", "pillarboxing", "barColor", "integerScaling",
 ]);
 
 /**
@@ -57,6 +65,106 @@ export function createCameraAPI(entity) {
     /** Background/clear color as a hex string, e.g. "#1a1a2e". */
     get backgroundColor() { return _requireCamera(entity).backgroundColor; },
     set backgroundColor(v) { _requireCamera(entity).backgroundColor = v; },
+
+    /**
+     * Which reference-resolution field set is active: 'Landscape' |
+     * 'Portrait' | 'Square' | 'Custom'. Switching this changes which of
+     * landscapeWidth/portraitWidth/squareSize/customWidth (etc.) the
+     * game is actually played/exported at — see Camera.js's header for
+     * what each mode uses.
+     */
+    get aspectMode() { return _requireCamera(entity).aspectMode; },
+    set aspectMode(v) { _requireCamera(entity).aspectMode = v; },
+
+    /** Reference resolution width in px, used when aspectMode === 'Landscape'. */
+    get landscapeWidth() { return _requireCamera(entity).landscapeWidth; },
+    set landscapeWidth(v) { _requireCamera(entity).landscapeWidth = Math.max(1, v); },
+    /** Reference resolution height in px, used when aspectMode === 'Landscape'. */
+    get landscapeHeight() { return _requireCamera(entity).landscapeHeight; },
+    set landscapeHeight(v) { _requireCamera(entity).landscapeHeight = Math.max(1, v); },
+
+    /** Reference resolution width in px, used when aspectMode === 'Portrait'. */
+    get portraitWidth() { return _requireCamera(entity).portraitWidth; },
+    set portraitWidth(v) { _requireCamera(entity).portraitWidth = Math.max(1, v); },
+    /** Reference resolution height in px, used when aspectMode === 'Portrait'. */
+    get portraitHeight() { return _requireCamera(entity).portraitHeight; },
+    set portraitHeight(v) { _requireCamera(entity).portraitHeight = Math.max(1, v); },
+
+    /** Reference resolution size in px (1:1), used when aspectMode === 'Square'. */
+    get squareSize() { return _requireCamera(entity).squareSize; },
+    set squareSize(v) { _requireCamera(entity).squareSize = Math.max(1, v); },
+
+    /** Reference resolution width in px, used when aspectMode === 'Custom'. */
+    get customWidth() { return _requireCamera(entity).customWidth; },
+    set customWidth(v) { _requireCamera(entity).customWidth = Math.max(1, v); },
+    /** Reference resolution height in px, used when aspectMode === 'Custom'. */
+    get customHeight() { return _requireCamera(entity).customHeight; },
+    set customHeight(v) { _requireCamera(entity).customHeight = Math.max(1, v); },
+
+    /**
+     * Scene-wide fake-3D depth toggle. When true, every sprite's
+     * Transform.z also scales its rendered size (more negative z =
+     * farther from camera = smaller) on top of always controlling draw
+     * order. When false (default), z only controls draw order.
+     */
+    get enablePseudo3D() { return _requireCamera(entity).enablePseudo3D; },
+    set enablePseudo3D(v) { _requireCamera(entity).enablePseudo3D = !!v; },
+
+    /**
+     * How the reference resolution maps onto the player's actual screen
+     * size: 'Expand' | 'Fit' | 'Fill' | 'Stretch'. See Camera.js's
+     * ScalingMode doc comment for exactly what each mode does.
+     */
+    get scalingMode() { return _requireCamera(entity).scalingMode; },
+    set scalingMode(v) { _requireCamera(entity).scalingMode = v; },
+
+    /**
+     * EXPAND-only: true keeps the reference HEIGHT exact (width expands/
+     * contracts to match the device), false keeps the reference WIDTH
+     * exact instead. No effect on any other scalingMode.
+     */
+    get keepHeight() { return _requireCamera(entity).keepHeight; },
+    set keepHeight(v) { _requireCamera(entity).keepHeight = !!v; },
+
+    /**
+     * EXPAND-only safety override: true downgrades Expand to behave like
+     * Fit, so the reference aspect ratio is never altered. No effect on
+     * Fit/Fill/Stretch.
+     */
+    get aspectRatioLock() { return _requireCamera(entity).aspectRatioLock; },
+    set aspectRatioLock(v) { _requireCamera(entity).aspectRatioLock = !!v; },
+
+    /**
+     * STRETCH-only safety override: false (default) downgrades Stretch to
+     * behave like Fit, so the picture can never actually distort. Set
+     * true to permit real non-uniform stretching.
+     */
+    get allowStretching() { return _requireCamera(entity).allowStretching; },
+    set allowStretching(v) { _requireCamera(entity).allowStretching = !!v; },
+
+    /**
+     * Horizontal bars (top/bottom): 'Auto' | 'On' | 'Off'. Shown when
+     * Fit (or a mode downgraded to Fit) leaves vertical space unused.
+     */
+    get letterboxing() { return _requireCamera(entity).letterboxing; },
+    set letterboxing(v) { _requireCamera(entity).letterboxing = v; },
+
+    /** Vertical bars (left/right): 'Auto' | 'On' | 'Off'. Same idea as letterboxing, for horizontal space left over. */
+    get pillarboxing() { return _requireCamera(entity).pillarboxing; },
+    set pillarboxing(v) { _requireCamera(entity).pillarboxing = v; },
+
+    /** Color painted into letterbox/pillarbox bars when they're shown, as a hex string. */
+    get barColor() { return _requireCamera(entity).barColor; },
+    set barColor(v) { _requireCamera(entity).barColor = v; },
+
+    /**
+     * Rounds the computed device-fit scale down to the nearest whole
+     * integer (never below 1x) — keeps pixel art crisp instead of
+     * blurry at fractional scales. No effect on a genuine Stretch
+     * (allowStretching:true).
+     */
+    get integerScaling() { return _requireCamera(entity).integerScaling; },
+    set integerScaling(v) { _requireCamera(entity).integerScaling = !!v; },
 
     /** Camera world-space X position (same as this.x on the camera entity). */
     get x() { var t = entity.getComponent(TRANSFORM); return t ? t.x : 0; },
