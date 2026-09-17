@@ -261,18 +261,40 @@ function buildMainJs(opts) {
     "function loadSpriteAssets() {",
     "  const loads = SPRITE_MANIFEST.map(function (entry) {",
     "    return new Promise(function (resolve) {",
+    "      let settled = false;",
+    "      const finish = function () {",
+    "        if (settled) return;",
+    "        settled = true;",
+    "        resolve();",
+    "      };",
     "      try {",
     "        const texture = PIXI.Texture.from(entry.file);",
     "        if (texture.baseTexture.valid) {",
     "          registerTexture(entry.key, texture);",
-    "          resolve();",
+    "          finish();",
     "        } else {",
-    '          texture.baseTexture.once("loaded", function () { registerTexture(entry.key, texture); resolve(); });',
-    '          texture.baseTexture.once("error", function () { console.error("[game] Failed to load sprite:", entry.file); resolve(); });',
+    '          texture.baseTexture.once("loaded", function () { registerTexture(entry.key, texture); finish(); });',
+    '          texture.baseTexture.once("error", function () { console.error("[game] Failed to load sprite (baseTexture error event):", entry.file); finish(); });',
+    "          // Belt-and-suspenders timeout: PIXI v7's \"error\" event on",
+    "          // baseTexture does not reliably fire for every failure mode",
+    "          // of the underlying <img>/network fetch (e.g. some 404s or",
+    "          // blocked requests resolve the DOM's own error handling",
+    "          // without ever reaching baseTexture's own emitter). Without",
+    "          // this, a single bad/missing sprite path would leave this",
+    "          // promise (and therefore Promise.all + the whole boot())",
+    "          // hanging forever with no thrown error and no console",
+    "          // message — exactly a silent black-screen/12s-timeout boot",
+    "          // failure. 8s is comfortably longer than any real image",
+    "          // load should take, including on a slow connection.",
+    "          setTimeout(function () {",
+    "            if (settled) return;",
+    '            console.error("[game] Sprite never finished loading (timed out) - check this path exists in the export:", entry.file);',
+    "            finish();",
+    "          }, 8000);",
     "        }",
     "      } catch (err) {",
     '        console.error("[game] Failed to load sprite:", entry.file, err);',
-    "        resolve();",
+    "        finish();",
     "      }",
     "    });",
     "  });",
@@ -372,7 +394,11 @@ function buildMainJs(opts) {
     "  window.__zengineGame = game;",
     "}",
     "",
-    "boot();",
+    "boot().catch(function (err) {",
+    '  console.error("[game] boot() failed:", err);',
+    "  window.__zengineBootError = (err && (err.stack || err.message)) || String(err);",
+    '  window.dispatchEvent(new CustomEvent("zengine-boot-error", { detail: window.__zengineBootError }));',
+    "});",
     "",
   ].join("\n");
 }
@@ -418,22 +444,31 @@ function buildIndexHtml(title, pwa, hasFavicon) {
   const fallbackScript =
     '<script>\n' +
     '(function(){\n' +
+    '  var shown=false;\n' +
     '  function showFallback(detail){\n' +
+    '    if (shown) return;\n' +
+    '    shown=true;\n' +
     '    var el=document.getElementById("game-canvas")||document.body;\n' +
+    '    var safeDetail=String(detail||"A required file failed to load.").replace(/[&<>]/g, function(c){return {"&":"&amp;","<":"&lt;",">":"&gt;"}[c];});\n' +
     '    el.innerHTML="<div style=\\"display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;background:#111;color:#fff;font-family:system-ui,sans-serif;text-align:center;padding:20px;box-sizing:border-box;\\">"+\n' +
     '      "<h2 style=\\"margin:0 0 8px;font-size:18px;\\">Game failed to load</h2>"+\n' +
-    '      "<p style=\\"margin:0 0 16px;color:#999;font-size:13px;max-width:340px;\\">"+(detail||"A required file failed to load.")+" Try reloading — if this keeps happening, the upload may be missing files.</p>"+\n' +
+    '      "<p style=\\"margin:0 0 16px;color:#999;font-size:13px;max-width:420px;white-space:pre-wrap;word-break:break-word;\\">"+safeDetail+"</p>"+\n' +
     '      "<button onclick=\\"location.reload()\\" style=\\"padding:8px 24px;background:#6366f1;border:none;border-radius:6px;color:#fff;cursor:pointer;font-size:13px;\\">Reload</button>"+\n' +
     '      "</div>";\n' +
     '  }\n' +
     '  window.addEventListener("error", function(e){\n' +
-    '    var msg=(e.error&&e.error.message)||e.message||"";\n' +
-    '    if (msg.indexOf("Unexpected end of input")!==-1||msg.indexOf("SyntaxError")!==-1||msg.toLowerCase().indexOf("failed to fetch")!==-1) showFallback();\n' +
+    '    var msg=(e.error&&(e.error.stack||e.error.message))||e.message||"";\n' +
+    '    if (msg.indexOf("Unexpected end of input")!==-1||msg.indexOf("SyntaxError")!==-1||msg.toLowerCase().indexOf("failed to fetch")!==-1) showFallback(msg);\n' +
     '  }, true);\n' +
-    '  window.addEventListener("unhandledrejection", function(){ /* boot() catches its own promise chain; a stray rejection here is not fatal on its own */ });\n' +
+    '  window.addEventListener("unhandledrejection", function(e){\n' +
+    '    var reason=e && e.reason;\n' +
+    '    var msg=(reason && (reason.stack||reason.message))||String(reason||"An unexpected error occurred while starting the game.");\n' +
+    '    showFallback(msg);\n' +
+    '  });\n' +
+    '  window.addEventListener("zengine-boot-error", function(e){ showFallback(e.detail); });\n' +
     '  setTimeout(function(){\n' +
     '    var c=document.getElementById("game-canvas");\n' +
-    '    if (c && c.children.length===0) showFallback();\n' +
+    '    if (c && c.children.length===0) showFallback("The game did not finish starting within 12 seconds (no fatal error was reported). This can happen if a required file — a script, scene, or asset — is missing from the upload, or a slow/blocked network request never resolved.");\n' +
     '  }, 12000);\n' +
     '})();\n' +
     '</script>\n';

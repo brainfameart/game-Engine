@@ -298,14 +298,36 @@ export class LightingSystem extends System {
 
     const settings = this._readSettings(world);
 
-    const lightEntities = world
+    const allLightEntities = world
       .query(TRANSFORM, LIGHT)
       .filter((e) => e.getComponent(LIGHT).castsOnWorld);
 
-    if (lightEntities.length === 0) {
+    if (allLightEntities.length === 0) {
       this._teardownAllSpriteFilters();
       return;
     }
+
+    // PERFORMANCE: cull lights that can't reach any pixel currently on
+    // screen before they're ever uploaded to the shader. Phase 1
+    // loops over every uploaded light for every pixel of the light
+    // texture (see LightTextureShaderSource.js's main()), so a light
+    // sitting far outside the camera's view still cost real per-pixel
+    // ALU/shadow-test time every frame even though it could never be
+    // visible — this is the actual reason "many lights in a scene"
+    // used to tank frame rate even on scenes where most of those
+    // lights were off-screen most of the time (open-world/large-level
+    // scenes especially). Culling here, in JS, before the upload is
+    // the cheap side of that tradeoff: a handful of bounds checks on
+    // the CPU once per frame vs. real GPU shader work for every culled
+    // light on every pixel.
+    const visibleLightEntities = this._cullOffscreenLights(allLightEntities);
+
+    if (visibleLightEntities.length === 0) {
+      this._teardownAllSpriteFilters();
+      return;
+    }
+
+    const lightEntities = visibleLightEntities;
 
     // These two warnings fire every frame the scene stays over budget
     // (update() runs every tick) — logged only ONCE per distinct
@@ -620,6 +642,110 @@ export class LightingSystem extends System {
     filter.uniforms.uStageOffset[1] = offsetY;
     filter.uniforms.uStageScale = scale || 1;
     return scale || 1;
+  }
+
+  /**
+   * Drops every light entity whose bounding circle can't possibly
+   * touch a pixel currently visible on screen, BEFORE it's counted
+   * toward uLightCount or uploaded to any uniform array. This is the
+   * fix for "a scene with many lights runs slow even when most of
+   * them are off-screen" — Phase 1's shader (see
+   * LightTextureShaderSource.js's main()) loops over every uploaded
+   * light for every pixel of the light texture, so an off-screen
+   * light was previously paying real per-pixel ALU (and, if it casts
+   * shadows, a full occluder loop / raymarch) every frame for zero
+   * visible benefit.
+   *
+   * Directional lights are NEVER culled — by definition they light
+   * the entire screen uniformly (see Light.js's DIRECTIONAL doc
+   * comment), so there is no "off-screen" for one to be culled to.
+   *
+   * The screen rect is expanded by each light's own reach before the
+   * test (rather than testing only the light's Transform position),
+   * so a light whose SOURCE sits just off-screen but whose glow still
+   * spills onto visible pixels is correctly kept, not culled — this
+   * matters most for large-radius lights near screen edges and for
+   * Area lights, whose emitting rectangle can be sizeable.
+   *
+   * @param {Entity[]} lightEntities entities already filtered to
+   *   TRANSFORM+LIGHT with castsOnWorld true (see update())
+   * @returns {Entity[]} the subset that can actually affect the
+   *   current screen, in the SAME relative order (so light "slot"
+   *   assignment — and therefore flicker-phase, which is seeded from
+   *   a light's index — stays stable frame to frame as unrelated
+   *   off-screen lights are added/removed elsewhere in the scene)
+   */
+  _cullOffscreenLights(lightEntities) {
+    if (!this.pixiApp || !this.pixiApp.renderer) return lightEntities;
+
+    const screen = this.pixiApp.renderer.screen;
+    // Recompute the same world<->screen mapping _syncStageTransform
+    // uploads to the shader (offset/scale walked up worldContainer's
+    // own parent chain), rather than reusing filter.uniforms — this
+    // runs BEFORE _syncStageTransform() is called for the frame (see
+    // update()'s ordering), so the uniform values could still be
+    // stale from last frame at this point.
+    let offsetX = 0;
+    let offsetY = 0;
+    let scale = 1;
+    let node = this.worldContainer;
+    while (node) {
+      offsetX = offsetX * node.scale.x + node.x;
+      offsetY = offsetY * node.scale.y + node.y;
+      scale *= node.scale.x;
+      node = node.parent;
+    }
+    const safeScale = scale || 1;
+
+    // Visible world-space rect: invert the screen<->world mapping
+    // Phase 1's shader itself uses (screenPixel = worldPos * scale +
+    // offset), i.e. worldPos = (screenPixel - offset) / scale.
+    const worldLeft = (0 - offsetX) / safeScale;
+    const worldTop = (0 - offsetY) / safeScale;
+    const worldRight = (screen.width - offsetX) / safeScale;
+    const worldBottom = (screen.height - offsetY) / safeScale;
+    const minX = Math.min(worldLeft, worldRight);
+    const maxX = Math.max(worldLeft, worldRight);
+    const minY = Math.min(worldTop, worldBottom);
+    const maxY = Math.max(worldTop, worldBottom);
+
+    return lightEntities.filter((entity) => {
+      const light = entity.getComponent(LIGHT);
+      if (light.type === LightType.DIRECTIONAL) return true;
+
+      const transform = entity.getComponent(TRANSFORM);
+      let reach;
+      if (light.type === LightType.AREA) {
+        // Half-diagonal of the emitting rect plus its own falloff
+        // radius — a generous but cheap bound, avoids under-culling a
+        // wide/tall Area light near an edge.
+        reach = Math.hypot((light.width || 0) / 2, (light.height || 0) / 2) + Math.max(0, light.radius || 0);
+      } else if (light.type === LightType.FREEFORM) {
+        // Farthest declared point from the light's own origin, since
+        // Freeform has no single radius field (see Light.js).
+        let farthest = 0;
+        const pts = light.points || [];
+        for (let p = 0; p < pts.length; p++) {
+          const d = Math.hypot(pts[p].x || 0, pts[p].y || 0);
+          if (d > farthest) farthest = d;
+        }
+        reach = farthest;
+      } else {
+        // Point / Spot / GodRays: radius is the light's own documented
+        // falloff distance (see Light.js) — exact bound, no cone-angle
+        // narrowing applied, since a cheap circle test is what makes
+        // this worth doing at all; a spot facing away from the screen
+        // still costs one bounds check either way, not a per-pixel one.
+        reach = Math.max(0, light.radius || 0);
+      }
+
+      return (
+        transform.x + reach >= minX &&
+        transform.x - reach <= maxX &&
+        transform.y + reach >= minY &&
+        transform.y - reach <= maxY
+      );
+    });
   }
 
   /**
