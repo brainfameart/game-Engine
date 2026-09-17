@@ -129,8 +129,10 @@ const RUNTIME_FILES = [
   "scripting/components/JoystickAPI.js",
   "scripting/components/LightAPI.js",
   "scripting/components/NavAgentAPI.js",
+  "scripting/components/LightingSettingsAPI.js",
   "scripting/components/RigidbodyAPI.js",
   "scripting/components/SaveAPI.js",
+  "scripting/components/ShadowCasterAPI.js",
   "scripting/components/ShapeAPI.js",
   "scripting/components/SpeechBubbleAPI.js",
   "scripting/components/SpriteAPI.js",
@@ -305,44 +307,46 @@ function buildMainJs(opts) {
     "  for (const entry of AUDIO_MANIFEST) registerAudio(entry.key, entry.file);",
     "}",
     "",
-    "// Loads every scene the project has (scenes/index.json + each",
-    "// scenes/<id>.json) so scene.load('Name') works exactly like the",
-    "// editor's Play popup (see play-popup.js's",
-    "// game.loadAllScenes(payload.allScenes) call, which this mirrors),",
-    "// then loads the active scene's data through loadFromData() — NOT",
-    "// loadScene(url)/fetch, because only loadFromData() records the",
-    "// _initialSceneData snapshot scene.restart() needs (see",
-    "// runtime/index.js's _applyPendingSceneChange: a 'restart' with no",
-    "// snapshot silently does nothing). Falls back to the single",
-    "// scene.json file alone if the full index can't be fetched, so an",
-    "// older/partial export still boots (just without multi-scene support).",
-    "async function loadAllScenesOrFallback(game) {",
-    "  try {",
-    '    const indexRes = await fetch("./scenes/index.json");',
-    "    if (!indexRes.ok) throw new Error(\"no scenes/index.json (\" + indexRes.status + \")\");",
-    "    const index = await indexRes.json();",
-    "    const allScenes = await Promise.all(index.map(async function (entry) {",
-    '      const res = await fetch("./scenes/" + entry.file);',
-    "      const payload = await res.json();",
-    "      return { id: payload.id || entry.id, name: payload.name || entry.name, data: payload.data };",
-    "    }));",
-    "    if (!allScenes.length) throw new Error(\"scenes/index.json was empty\");",
-    "    game.loadAllScenes(allScenes);",
-    '    const activeRes = await fetch("./scene.json");',
-    "    const activeData = await activeRes.json();",
-    "    game.loadFromData(activeData);",
-    "    return;",
-    "  } catch (err) {",
-    '    console.warn("[game] Could not load the full scene list; scene.load() to other scenes will not work.", err);',
-    "  }",
+    "// Loads the active scene through loadFromData() so scene.restart()",
+    "// has the _initialSceneData snapshot it needs (see runtime/index.js:",
+    "// loadScene(url) alone does NOT set that snapshot, only loadFromData",
+    "// does — a restart with no snapshot silently does nothing). This is",
+    "// the ONLY fetch boot() waits on; it is deliberately just the one",
+    "// request, same as the simple, previously-proven-reliable version of",
+    "// this file, so a slow/unavailable network can only ever block boot",
+    "// on a single file instead of a chain of several.",
+    "//",
+    "// The REST of the project's scenes (needed only for scene.load('Name')",
+    "// to another scene at runtime) are loaded separately, in the",
+    "// background, AFTER the game is already up and rendering — see",
+    "// loadRemainingScenesInBackground() below. A project with only one",
+    "// scene, or a host that can't serve scenes/index.json for any reason,",
+    "// still boots exactly like before; only scene.load() to an OTHER",
+    "// scene stops working, silently logged as a warning, not a boot",
+    "// failure.",
+    "async function loadActiveScene(game) {",
+    '  const res = await fetch("./scene.json");',
+    "  if (!res.ok) throw new Error(\"Failed to fetch scene.json (\" + res.status + \")\");",
+    "  const data = await res.json();",
+    "  game.loadFromData(data);",
+    "}",
     "",
-    "  try {",
-    '    const res = await fetch("./scene.json");',
-    "    const data = await res.json();",
-    "    game.loadFromData(data);",
-    "  } catch (err) {",
-    '    console.error("[game] Failed to load scene.json", err);',
-    "  }",
+    "function loadRemainingScenesInBackground(game) {",
+    '  fetch("./scenes/index.json")',
+    "    .then(function (res) { return res.ok ? res.json() : Promise.reject(new Error(\"no scenes/index.json (\" + res.status + \")\")); })",
+    "    .then(function (index) {",
+    "      return Promise.all(index.map(function (entry) {",
+    '        return fetch("./scenes/" + entry.file)',
+    "          .then(function (res) { return res.json(); })",
+    "          .then(function (payload) { return { id: payload.id || entry.id, name: payload.name || entry.name, data: payload.data }; });",
+    "      }));",
+    "    })",
+    "    .then(function (allScenes) {",
+    "      if (allScenes.length) game.loadAllScenes(allScenes);",
+    "    })",
+    "    .catch(function (err) {",
+    '      console.warn("[game] Could not load the full scene list in the background; scene.load() to other scenes will not work.", err);',
+    "    });",
     "}",
     "",
     "async function boot() {",
@@ -367,7 +371,12 @@ function buildMainJs(opts) {
     '  const game = createGame({ pixiApp, followMainCamera: true, gameId: document.title || "zenengine-game", navAreaNames: ' + JSON.stringify(navAreaNames) + ' });',
     "  game.loop.setTargetFps(" + JSON.stringify(gameFps || 0) + ");",
     "",
-    "  await loadAllScenesOrFallback(game);",
+    "  try {",
+    "    await loadActiveScene(game);",
+    "  } catch (err) {",
+    '    console.error("[game] Failed to load scene.json", err);',
+    "  }",
+    "  loadRemainingScenesInBackground(game);",
     "",
     "  try { await game.saveReady; } catch (err) { /* start with an empty save */ }",
     "",
@@ -421,8 +430,24 @@ function buildIndexHtml(title, pwa, hasFavicon) {
     : hasFavicon
     ? '<link rel="icon" type="image/png" href="' + iconHref + '" />\n'
     : "";
+  // The service worker is a pure enhancement (offline caching / installability)
+  // — it must never be able to break the game itself. Some hosts/preview
+  // proxies 404 on sw.js and fall back to serving index.html for every
+  // unmatched path; the browser then rejects registration with "unsupported
+  // MIME type ('text/html')". That rejection is caught and swallowed here
+  // (and marked __zengineSwRegistered = false for anyone who wants to check)
+  // instead of being left to reach window's unhandledrejection listener,
+  // which would otherwise paint the fallback error screen over an already-
+  // working game — see the fallback script's own comment below.
   const pwaBody = pwa
-    ? '  <script>\n    if ("serviceWorker" in navigator) {\n      window.addEventListener("load", function () { navigator.serviceWorker.register("./sw.js", { scope: "./", updateViaCache: "none" }); });\n    }\n  </script>\n'
+    ? '  <script>\n    if ("serviceWorker" in navigator) {\n      window.addEventListener("load", function () {\n' +
+      '        navigator.serviceWorker.register("./sw.js", { scope: "./", updateViaCache: "none" }).then(function () {\n' +
+      "          window.__zengineSwRegistered = true;\n" +
+      "        }).catch(function (err) {\n" +
+      "          window.__zengineSwRegistered = false;\n" +
+      '          console.warn("[game] Offline support unavailable (service worker registration failed); the game itself is unaffected.", err);\n' +
+      "        });\n" +
+      "      });\n    }\n  </script>\n"
     : "";
   // Blank-screen safety net: if main.js (or anything it imports) fails
   // to load — a 404'd module on a host that doesn't serve extensionless/
@@ -458,11 +483,17 @@ function buildIndexHtml(title, pwa, hasFavicon) {
     '  }\n' +
     '  window.addEventListener("error", function(e){\n' +
     '    var msg=(e.error&&(e.error.stack||e.error.message))||e.message||"";\n' +
-    '    if (msg.indexOf("Unexpected end of input")!==-1||msg.indexOf("SyntaxError")!==-1||msg.toLowerCase().indexOf("failed to fetch")!==-1) showFallback(msg);\n' +
+    '    if (msg.indexOf("Unexpected end of input")===-1&&msg.indexOf("SyntaxError")===-1&&msg.toLowerCase().indexOf("failed to fetch")===-1) return;\n' +
+    '    var c=document.getElementById("game-canvas");\n' +
+    '    if (c && c.children.length>0) return;\n' +
+    '    showFallback(msg);\n' +
     '  }, true);\n' +
     '  window.addEventListener("unhandledrejection", function(e){\n' +
     '    var reason=e && e.reason;\n' +
     '    var msg=(reason && (reason.stack||reason.message))||String(reason||"An unexpected error occurred while starting the game.");\n' +
+    '    if (msg.toLowerCase().indexOf("serviceworker")!==-1||msg.toLowerCase().indexOf("service worker")!==-1) return;\n' +
+    '    var c=document.getElementById("game-canvas");\n' +
+    '    if (c && c.children.length>0) return;\n' +
     '    showFallback(msg);\n' +
     '  });\n' +
     '  window.addEventListener("zengine-boot-error", function(e){ showFallback(e.detail); });\n' +
